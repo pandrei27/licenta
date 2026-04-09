@@ -13,6 +13,7 @@ import axios from 'axios';
 // Logic for calculating state (as per Section 5)
 const calculateState = (nodes, edges, rootNodeId, rootState) => {
   const nodeStates = { [rootNodeId]: rootState };
+  const visited = new Set(); // Rule 3: Registry to prevent infinite feedback loops
   
   const getTargetState = (sourceState, edgeType) => {
     if (edgeType === 'DIRECT') return sourceState;
@@ -20,12 +21,16 @@ const calculateState = (nodes, edges, rootNodeId, rootState) => {
   };
 
   const processEdges = (sourceId) => {
+    if (visited.has(sourceId)) return; // Terminate if already visited
+    visited.add(sourceId);
+
     edges.forEach(edge => {
       if (edge.source === sourceId) {
         const sourceState = nodeStates[sourceId];
         const targetState = getTargetState(sourceState, edge.data.base_direction);
         nodeStates[edge.target] = targetState;
-        // Recursive call to cascade state through the branches
+        
+        // Recursive call
         processEdges(edge.target);
       }
     });
