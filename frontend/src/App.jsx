@@ -1,121 +1,106 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import React, { useEffect } from 'react';
+import ReactFlow, { 
+  Background, 
+  Controls, 
+  MiniMap, 
+  useNodesState, 
+  useEdgesState,
+  MarkerType
+} from 'reactflow';
+import 'reactflow/dist/style.css';
+import axios from 'axios';
+
+// Logic for calculating state (as per Section 5)
+const calculateState = (nodes, edges, rootNodeId, rootState) => {
+  const nodeStates = { [rootNodeId]: rootState };
+  
+  const getTargetState = (sourceState, edgeType) => {
+    if (edgeType === 'DIRECT') return sourceState;
+    return sourceState === 'INCREASING' ? 'DECREASING' : 'INCREASING';
+  };
+
+  const processEdges = (sourceId) => {
+    edges.forEach(edge => {
+      if (edge.source === sourceId) {
+        const sourceState = nodeStates[sourceId];
+        const targetState = getTargetState(sourceState, edge.data.base_direction);
+        nodeStates[edge.target] = targetState;
+        // Recursive call to cascade state through the branches
+        processEdges(edge.target);
+      }
+    });
+  };
+
+  processEdges(rootNodeId);
+  return nodeStates;
+};
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [nodes, setNodes, onNodesChange] = useNodesState([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const response = await axios.get('http://127.0.0.1:8000/api/simulation/uuid-1');
+        const { nodes: apiNodes, edges: apiEdges } = response.data;
+
+        // Simulation parameters (Root is INCREASING)
+        const rootId = 'uuid-1';
+        const rootState = 'INCREASING';
+        const states = calculateState(apiNodes, apiEdges, rootId, rootState);
+
+        const styledNodes = apiNodes.map(node => ({
+          ...node,
+          style: { 
+            background: states[node.id] === 'INCREASING' ? '#22c55e' : (states[node.id] === 'DECREASING' ? '#ef4444' : '#6b7280'),
+            color: '#fff',
+            padding: 10,
+            borderRadius: 5,
+            width: 150
+          },
+          data: { label: node.data.label }
+        }));
+
+        const styledEdges = apiEdges.map(edge => ({
+          ...edge,
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+          },
+          style: { 
+            strokeWidth: edge.data.impact_magnitude,
+            stroke: states[edge.source] === 'INCREASING' ? 
+              (edge.data.base_direction === 'DIRECT' ? '#22c55e' : '#ef4444') :
+              (edge.data.base_direction === 'DIRECT' ? '#ef4444' : '#22c55e')
+          }
+        }));
+
+        setNodes(styledNodes);
+        setEdges(styledEdges);
+      } catch (error) {
+        console.error("Error fetching simulation data:", error);
+      }
+    };
+
+    fetchData();
+  }, [setNodes, setEdges]);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+    <div style={{ width: '100vw', height: '100vh' }}>
+      <ReactFlow
+        nodes={nodes}
+        edges={edges}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        fitView
+        fitViewOptions={{ padding: 0.5 }}
+      >
+        <Background />
+        <Controls />
+        <MiniMap />
+      </ReactFlow>
+    </div>
+  );
 }
 
-export default App
+export default App;
