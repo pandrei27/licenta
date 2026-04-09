@@ -71,6 +71,11 @@ function App() {
           const edgeColor = states[edge.source] === 'INCREASING' ? 
             (edge.data.base_direction === 'DIRECT' ? '#22c55e' : '#ef4444') :
             (edge.data.base_direction === 'DIRECT' ? '#ef4444' : '#22c55e');
+          
+          // Scaling function: map percentage impact to stroke width (1px - 10px)
+          // Using logarithmic scaling to handle large percentage variance
+          const percentage = edge.data.impact_percentage || 1;
+          const strokeWidth = Math.min(10, Math.max(1, Math.log10(percentage + 1) * 3));
             
           return {
             ...edge,
@@ -79,7 +84,7 @@ function App() {
               color: edgeColor,
             },
             style: { 
-              strokeWidth: edge.data.impact_magnitude,
+              strokeWidth: strokeWidth,
               stroke: edgeColor
             }
           };

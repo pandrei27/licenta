@@ -28,13 +28,13 @@ async def get_simulation(node_id: str):
                 "id": "edge-1", 
                 "source": "uuid-1", 
                 "target": "uuid-2", 
-                "data": { "base_direction": "INVERSE", "impact_magnitude": 8, "reasoning": "Higher gold value reflects weaker USD." } 
+                "data": { "base_direction": "INVERSE", "impact_percentage": 15.5, "time_horizon": "Medium", "reasoning": "Higher gold value reflects weaker USD." } 
             },
             { 
                 "id": "edge-2", 
                 "source": "uuid-1", 
                 "target": "uuid-3", 
-                "data": { "base_direction": "DIRECT", "impact_magnitude": 5, "reasoning": "Gold often rises with inflationary expectations." } 
+                "data": { "base_direction": "DIRECT", "impact_percentage": 2.5, "time_horizon": "Short", "reasoning": "Gold often rises with inflationary expectations." } 
             }
         ]
     }
