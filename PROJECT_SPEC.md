@@ -10,25 +10,26 @@ The primary goal is to build a "Mental Model as a Service" for long-term capital
 3. Database Schema (Neo4j)
 Logic is stored exclusively on the Edges. Traversal is strictly unidirectional (Source $\rightarrow$ Target).
 Nodes (Entity):
-•	id: UUID (String) 
-•	label: String (e.g., "10-Year Treasury Yield") 
+•	id: UUID (String)
+•	label: String (e.g., "10-Year Treasury Yield")
 Edges (Relationship):
-•	source_id: UUID 
-•	target_id: UUID 
+•	source_id: UUID
+•	target_id: UUID
 •	base_direction: String (STRICT Enum: "DIRECT" or "INVERSE").
-•	impact_magnitude: Integer (1-10). Determines visual edge thickness.
-•	time_horizon: String (Enum: "Short", "Medium", "Long").
+•	impact_percentage: Float. The estimated real-world percentual impact on the target (e.g., 2.5, 15.0, 200.0). Un-capped.
+•	time_horizon: String (Enum: "Short", "Medium", "Long"). Strictly defined as Short = 3 months, Medium = 2 years, Long = 10+ years.
 •	reasoning: String (Verbose fundamental economic theory).
 4. API Data Contracts (FastAPI $\leftrightarrow$ React)
 The backend must serve data in a format natively digestible by React Flow.
-GET /api/simulation/{node_id} Returns the sub-graph needed for visualization.
+GET /api/simulation/{node_id}
+Returns the sub-graph needed for visualization.
 JSON
 {
   "nodes": [
     { "id": "uuid-1", "data": { "label": "Gold" }, "position": { "x": 0, "y": 0 } }
   ],
   "edges": [
-    { "id": "edge-uuid-1", "source": "uuid-1", "target": "uuid-2", "data": { "base_direction": "INVERSE", "impact_magnitude": 8, "reasoning": "..." } }
+    { "id": "edge-uuid-1", "source": "uuid-1", "target": "uuid-2", "data": { "base_direction": "INVERSE", "impact_percentage": 15.5, "time_horizon": "Medium", "reasoning": "..." } }
   ]
 }
 5. Algorithmic Logic: UI State Calculation (The Core Engine)
@@ -43,13 +44,16 @@ The Traversal Ruleset (Strict Unidirectional):
 6. UI/UX Elements & Interaction Flow
 Single Canvas Rule: There is only ever one active simulation on the screen. Starting a new simulation clears the current canvas.
 •	Simulation Init: A simple input bar where the user types "What happens if [Node] goes [UP/DOWN]?".
-•	Visual Rules: Calculated INCREASING nodes/edges render as GREEN. Calculated DECREASING nodes/edges render as RED. Edge thickness = edge.data.impact_magnitude (mapped to CSS stroke-width).
-•	Node Interaction ("View More"): Clicking a node opens a side panel or modal displaying the stored macroeconomic reasoning and expected percentual impact for the relationship that led to it.
+•	Visual Rules: * Calculated INCREASING nodes/edges render as GREEN.
+o	Calculated DECREASING nodes/edges render as RED.
+o	Edge Thickness: Mapped dynamically from edge.data.impact_percentage. Because percentages are un-capped, the frontend must apply a normalization or logarithmic scaling function to convert the percentage into a readable CSS stroke-width (e.g., ensuring a 500% impact doesn't cover the entire screen, while a 0.5% impact remains visible).
+•	Node Interaction ("View More"): Clicking a node opens a side panel or modal displaying the stored macroeconomic reasoning, the exact impact_percentage, and the time_horizon data from the edge that connects to it.
 •	Expansion (The "Expand" Button): Available on any node. Clicking expand DOES NOT change the current state of the node. It triggers the backend to query Gemini for $n=1$ new neighbors, writes them to Neo4j, and refreshes the React Flow canvas to show the new deeper level.
 7. AI Prompting Strategy & LLM Schema
-To prevent hallucinations and iteration loops, the AI is used only as a Map Maker, not a State Simulator. The AI defines the universal rules (DIRECT/INVERSE), while Python handles the state calculation.
-The System Prompt for /api/expand/{node_id}: When expanding a node, the backend queries Neo4j for existing neighbors to avoid duplicates, then sends this prompt to Gemini:
-"You are an expert macroeconomist. Identify the top 3 macroeconomic factors structurally affected by [Node Label]. Do not include [List of existing neighbors]. Determine if the causal relationship is DIRECT (they move in the same direction) or INVERSE (they move in opposite directions). Provide a verbose reasoning. You must respond in the following JSON schema." 
+To prevent hallucinations and iteration loops, the AI is used only as a Map Maker, not a State Simulator. The AI defines the universal rules (DIRECT/INVERSE) and estimates the numerical percentage impact, while Python handles the state calculation.
+The System Prompt for /api/expand/{node_id}:
+When expanding a node, the backend queries Neo4j for existing neighbors to avoid duplicates, then sends this prompt to Gemini:
+"You are an expert macroeconomist. Identify the top 3 macroeconomic factors structurally affected by a significant move in [Node Label]. Do not include [List of existing neighbors]. Determine if the causal relationship is DIRECT (they move in the same direction) or INVERSE (they move in opposite directions). Estimate the 'impact_percentage' (a realistic, un-capped numerical percentage estimating how much the target moves if the source makes a standard deviation move). Determine the 'time_horizon' using strictly these definitions: Short = 3 months, Medium = 2 years, Long = 10+ years. Provide a verbose reasoning. You must respond in the following JSON schema."
 Required Pydantic / JSON Output Schema for Gemini:
 JSON
 {
@@ -57,7 +61,7 @@ JSON
     {
       "target_node_label": "String",
       "base_direction": "DIRECT or INVERSE",
-      "impact_magnitude": 1,
+      "impact_percentage": 5.5,
       "time_horizon": "Short, Medium, or Long",
       "reasoning": "String (Verbose explanation)"
     }
@@ -72,16 +76,17 @@ Phase 1: Project Initialization & Basic UI Shell
 •	Install FastAPI, Uvicorn, and Pydantic on the backend.
 •	Create a simple, empty React Flow canvas that occupies 80% of the screen, with a top navigation bar for the simulation input.
 Phase 2: The Mocked Data Engine
-•	Create a hardcoded Python dictionary in FastAPI matching the JSON structure in Section 4. Include 3 nodes and 2 edges.
+•	Create a hardcoded Python dictionary in FastAPI matching the JSON structure in Section 4 (ensure impact_percentage is used).
 •	Create a GET endpoint to serve this mock data.
 •	Have React Flow fetch this data on load and render the basic, unstyled nodes and edges.
-Phase 3: The State Calculation Algorithm
+Phase 3: The State Calculation & UI Scaling Algorithm
 •	Implement the recursive Traversal Ruleset (Section 5) in JavaScript/React.
 •	Hardcode the root node's state as INCREASING.
-•	Write the logic that parses the incoming edges, checks if they are DIRECT or INVERSE, and dynamically assigns a GREEN or RED styling class to the connected nodes and edges. Ensure the visual rules from Section 6 are functional.
+•	Write the logic that parses incoming edges, checks DIRECT or INVERSE, and dynamically assigns a GREEN or RED styling class.
+•	Crucial: Write a scaling function in JavaScript that takes the impact_percentage (e.g., 0.5 to 300) and converts it to a reasonable CSS stroke-width (e.g., 1px to 10px max) so the visual edges scale appropriately.
 Phase 4: The Interaction Layer
 •	Build the "View More" feature. Add an onClick event to the React Flow nodes.
-•	When clicked, slide out a side panel or modal. Populate it with the reasoning, impact_magnitude, and time_horizon data from the edge that connects to it.
+•	When clicked, slide out a side panel or modal. Populate it with the reasoning, explicit impact_percentage, and explicit time_horizon (Short/Medium/Long) data.
 •	Add an inactive "Expand" button inside this side panel.
 Phase 5: The Graph Database Integration
 •	Connect FastAPI to the local Neo4j Desktop instance using the official Python driver.
@@ -95,7 +100,7 @@ Phase 6: The Simulation Init
 Phase 7: The AI Brain (Expansion Engine)
 •	Connect the FastAPI backend to the Gemini API using the google-generativeai package.
 •	Create the /api/expand/{node_id} endpoint.
-•	Write the backend logic to execute the prompt from Section 7, enforcing the strict JSON output schema using Pydantic.
+•	Write the backend logic to execute the prompt from Section 7, enforcing the strict JSON output schema using Pydantic. Ensure the prompt includes the strict definitions for the time horizons and the percentage logic.
 •	Write the Cypher MERGE query to insert the AI-generated nodes and edges into Neo4j.
 •	Wire the "Expand" button on the frontend to hit this endpoint, wait for the response, and then re-fetch the simulation data to update the canvas.
 
