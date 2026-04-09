@@ -62,18 +62,23 @@ function App() {
           data: { label: node.data.label }
         }));
 
-        const styledEdges = apiEdges.map(edge => ({
-          ...edge,
-          markerEnd: {
-            type: MarkerType.ArrowClosed,
-          },
-          style: { 
-            strokeWidth: edge.data.impact_magnitude,
-            stroke: states[edge.source] === 'INCREASING' ? 
-              (edge.data.base_direction === 'DIRECT' ? '#22c55e' : '#ef4444') :
-              (edge.data.base_direction === 'DIRECT' ? '#ef4444' : '#22c55e')
-          }
-        }));
+        const styledEdges = apiEdges.map(edge => {
+          const edgeColor = states[edge.source] === 'INCREASING' ? 
+            (edge.data.base_direction === 'DIRECT' ? '#22c55e' : '#ef4444') :
+            (edge.data.base_direction === 'DIRECT' ? '#ef4444' : '#22c55e');
+            
+          return {
+            ...edge,
+            markerEnd: {
+              type: MarkerType.ArrowClosed,
+              color: edgeColor,
+            },
+            style: { 
+              strokeWidth: edge.data.impact_magnitude,
+              stroke: edgeColor
+            }
+          };
+        });
 
         setNodes(styledNodes);
         setEdges(styledEdges);
