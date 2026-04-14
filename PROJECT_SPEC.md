@@ -1,104 +1,152 @@
-PROJECT SPECIFICATION: CAUSAL-FLOW
-Subtitle: Autonomous Macroeconomic Reasoning Engine & Market Dynamics Analyzer
-1. Executive Summary & Core Objective
-The primary goal is to build a "Mental Model as a Service" for long-term capital allocation. The software provides fundamental causal reasoning by tracing the chain of macroeconomic events. This system focuses on a strict, unidirectional outward expansion from a single root node on a single active canvas to ensure architectural stability and rapid development.
-2. System Architecture & Tech Stack
-•	Frontend: React, Vite, React Flow (for interactive DAG visualization), TailwindCSS, Dagre (for automatic directed graph layout).
-•	Backend: Python (FastAPI).
-•	Database: Neo4j Desktop (Local graph database, bolt://localhost:7687).
-•	AI Integration: Google Gemini API (via google-generativeai), utilizing strict response_mime_type="application/json".
-3. Database Schema (Neo4j)
+# PROJECT SPECIFICATION: CAUSAL-FLOW 
+**Subtitle:** Autonomous Macroeconomic Reasoning Engine & Market Dynamics Analyzer
+
+**[GLOBAL AGENT DIRECTIVE]** You are an autonomous coding agent executing a strict, phased development plan. Your primary constraint is **API Rate Limit Preservation** and **Deterministic UI Stability**. 
+1. DO NOT hallucinate external libraries outside the approved stack.
+2. DO NOT implement database persistence (Neo4j) or live AI API calls (Gemini) until explicitly instructed in Phase 5 and Phase 7. 
+3. DO NOT skip phases. You must verify the functional completion of the current phase before moving to the next.
+
+---
+
+## 1. System Architecture & Tech Stack
+* **Frontend:** React 18, Vite (`react-ts` template), React Flow (for DAG visualization), TailwindCSS (for styling), Dagre (for mathematical directed graph layout).
+* **Backend:** Python 3.11+, FastAPI, Uvicorn.
+* **Prototyping Data Layer:** In-memory SQLite + Python `NetworkX` library (for rapid graph math and caching).
+* **Production Data Layer:** Neo4j Desktop (Local graph database, `bolt://localhost:7687`).
+* **AI Integration:** Google Gemini API (`google-generativeai`), utilizing strict `response_mime_type="application/json"`.
+
+---
+
+## 2. Database Schema & Data Models
 Logic is stored exclusively on the Edges. Traversal is strictly unidirectional (Source $\rightarrow$ Target).
-Nodes (Entity):
-•	id: UUID (String)
-•	label: String (e.g., "10-Year Treasury Yield")
-Edges (Relationship):
-•	source_id: UUID
-•	target_id: UUID
-•	base_direction: String (STRICT Enum: "DIRECT" or "INVERSE").
-•	impact_percentage: Float. The estimated real-world percentual impact on the target (e.g., 2.5, 15.0, 200.0). Un-capped.
-•	time_horizon: String (Enum: "Short", "Medium", "Long"). Strictly defined as Short = 3 months, Medium = 2 years, Long = 10+ years.
-•	reasoning: String (Verbose fundamental economic theory).
-4. API Data Contracts (FastAPI $\leftrightarrow$ React)
-Separation of Concerns: The backend API serves only semantic data. It does NOT calculate or serve UI X/Y coordinates.
-GET /api/simulation/{node_id}
+
+**Nodes (Entity Model):**
+* `id`: UUID4 (String)
+* `label`: String (e.g., "10-Year Treasury Yield")
+
+**Edges (Relationship Model):**
+* `source_id`: UUID4
+* `target_id`: UUID4
+* `base_direction`: String (STRICT Enum: `"DIRECT"` or `"INVERSE"`).
+* `impact_percentage`: Float. The estimated real-world percentual impact on the target (e.g., 2.5, 15.0). Un-capped.
+* `time_horizon`: String (Enum: `"Short"`, `"Medium"`, `"Long"`). Defined as Short = 3 months, Medium = 2 years, Long = 10+ years.
+* `reasoning`: String (Verbose fundamental economic theory).
+
+---
+
+## 3. API Data Contracts & Caching Logic (FastAPI $\leftrightarrow$ React)
+**Separation of Concerns:** The backend API serves only semantic graph data. It does NOT calculate or serve UI X/Y coordinates. 
+
+**[AGENT DIRECTIVE - BATCH CACHING]:** To circumvent AI API rate limits, the backend `/api/expand` endpoint will request $N=5$ relationships from the LLM at once. However, it will only return $N=1$ new node to the frontend per click. The remaining 4 nodes MUST be cached in SQLite/NetworkX. On subsequent requests, the backend MUST check the local cache before calling the Gemini API.
+
+**GET /api/simulation/{node_id}**
 Returns the sub-graph needed for visualization.
-JSON
+```json
 {
   "nodes": [
     { "id": "uuid-1", "data": { "label": "Gold" } }
   ],
   "edges": [
-    { "id": "edge-uuid-1", "source": "uuid-1", "target": "uuid-2", "data": { "base_direction": "INVERSE", "impact_percentage": 15.5, "time_horizon": "Medium", "reasoning": "..." } }
-  ]
-}
-5. Algorithmic Logic: UI State Calculation & Layout (The Core Engine)
-Auto-Layout (Dagre): When the frontend receives data from the backend, it injects a dummy { position: { x: 0, y: 0 } } object into every node, and then passes the nodes and edges through a dagre layout function to automatically position the graph into a readable tree structure before rendering.
-The Traversal Ruleset (Strict Unidirectional):
-1.	The user defines the Root Node and its Initial State (INCREASING or DECREASING).
-2.	The engine traverses outward ($N+1$).
-3.	Cycle Prevention: To prevent infinite feedback loops during UI traversal, the engine maintains a "visited nodes" registry. If a calculated path encounters an already rendered node, the edge is drawn, but further state calculation for that branch terminates.
-4.	If Target Node's Edge is DIRECT: The Target inherits the exact state of the Source. Source INCREASING + DIRECT Edge = Target INCREASING (Green). Source DECREASING + DIRECT Edge = Target DECREASING (Red).
-5.	If Target Node's Edge is INVERSE: The Target gets the opposite state of the Source. Source INCREASING + INVERSE Edge = Target DECREASING (Red). Source DECREASING + INVERSE Edge = Target INCREASING (Green).
-6.	This logic cascades down the branch recursively.
-6. UI/UX Elements & Interaction Flow
-Single Canvas Rule: There is only ever one active simulation on the screen. Starting a new simulation clears the current canvas.
-•	Simulation Init: A simple input bar where the user types "What happens if [Node] goes [UP/DOWN]?".
-•	Visual Rules: * Calculated INCREASING nodes/edges render as GREEN.
-o	Calculated DECREASING nodes/edges render as RED.
-o	Edge Thickness: Mapped dynamically from edge.data.impact_percentage. Because percentages are un-capped, the frontend must apply a normalization or logarithmic scaling function to convert the percentage into a readable CSS stroke-width.
-•	Node Interaction ("View More"): Clicking a node opens a side panel or modal displaying the stored macroeconomic reasoning, the exact impact_percentage, and the time_horizon data from the edge that connects to it.
-•	Expansion (The "Expand" Button): Available on any node. Clicking expand DOES NOT change the current state of the node. It triggers the backend to query Gemini for $n=1$ new neighbors, writes them to Neo4j, and refreshes the React Flow canvas to show the new deeper level.
-7. AI Prompting Strategy & LLM Schema
-The AI defines the universal rules (DIRECT/INVERSE) and estimates numerical percentage impact, while Python handles state calculation and React handles layout.
-The System Prompt for /api/expand/{node_id}:
-"You are an expert macroeconomist. Identify the top 3 macroeconomic factors structurally affected by a significant move in [Node Label]. Do not include [List of existing neighbors]. Determine if the causal relationship is DIRECT (they move in the same direction) or INVERSE (they move in opposite directions). Estimate the 'impact_percentage' (a realistic, un-capped numerical percentage estimating how much the target moves if the source makes a standard deviation move). Determine the 'time_horizon' using strictly these definitions: Short = 3 months, Medium = 2 years, Long = 10+ years. Provide a verbose reasoning. You must respond in the following JSON schema."
-Required Pydantic / JSON Output Schema for Gemini:
-JSON
-{
-  "new_relationships": [
-    {
-      "target_node_label": "String",
-      "base_direction": "DIRECT or INVERSE",
-      "impact_percentage": 5.5,
-      "time_horizon": "Short, Medium, or Long",
-      "reasoning": "String (Verbose explanation)"
+    { 
+      "id": "edge-uuid-1", 
+      "source": "uuid-1", 
+      "target": "uuid-2", 
+      "data": { 
+        "base_direction": "INVERSE", 
+        "impact_percentage": 15.5, 
+        "time_horizon": "Medium", 
+        "reasoning": "Higher yields increase opportunity cost of holding non-yielding gold." 
+      } 
     }
   ]
 }
-8. Verbose Implementation Phasing (For Agent Prompting)
-This section dictates the exact sequential order of development. Do not move to the next phase until the current phase is fully functional.
-Phase 1: Project Initialization & Basic UI Shell
-•	Scaffold the React (Vite) frontend and FastAPI backend.
-•	Install TailwindCSS, React Flow, Axios, and dagre on the frontend.
-•	Install FastAPI, Uvicorn, and Pydantic on the backend.
-•	Create a simple, empty React Flow canvas that occupies 80% of the screen, with a top navigation bar for the simulation input.
-Phase 2: The Mocked Data Engine
-•	Create a hardcoded Python dictionary in FastAPI matching the JSON structure in Section 4.
-•	Create a GET endpoint to serve this mock data.
-•	Have React Flow fetch this data on load and render the basic, unstyled nodes and edges. All nodes will initially stack at x:0, y:0.
-Phase 3: The State Calculation, Auto-Layout & UI Scaling Algorithm
-•	Auto-Layout: Write a utility function getLayoutedElements(nodes, edges) using dagre. Pass the fetched backend data through this function to automatically assign x and y coordinates so the graph forms a readable tree.
-•	Implement the recursive Traversal Ruleset (Section 5) in JavaScript/React. Hardcode the root node's state as INCREASING.
-•	Write the logic that parses incoming edges, checks DIRECT or INVERSE, and dynamically assigns a GREEN or RED styling class.
-•	Write a scaling function in JavaScript that takes the impact_percentage (e.g., 0.5 to 300) and converts it to a reasonable CSS stroke-width (e.g., 1px to 10px max).
-Phase 4: The Interaction Layer
-•	Build the "View More" feature. Add an onClick event to the React Flow nodes.
-•	When clicked, slide out a side panel or modal. Populate it with the reasoning, explicit impact_percentage, and explicit time_horizon data.
-•	Add an inactive "Expand" button inside this side panel.
-Phase 5: The Graph Database Integration
-•	Connect FastAPI to the local Neo4j Desktop instance using the official Python driver.
-•	Write a Cypher query that traverses from a root node up to 3 levels deep.
-•	Format the Neo4j output to perfectly match the JSON schema from Section 4.
-•	Replace the mock data endpoint from Phase 2 with this live Neo4j query. Ensure the frontend still auto-layouts and renders correctly.
-Phase 6: The Simulation Init
-•	Build the UI for the top input bar: a text input for the Node Label (e.g., "Gold") and a dropdown for the Initial State (UP/DOWN).
-•	Create a "Start Simulation" button.
-•	When clicked, clear the canvas. Send the root node label to the backend. The backend searches Neo4j for that node and returns its sub-graph. The frontend then runs dagre layout, applies the initial UP/DOWN state, and cascades the colors.
-Phase 7: The AI Brain (Expansion Engine)
-•	Connect the FastAPI backend to the Gemini API using the google-generativeai package.
-•	Create the /api/expand/{node_id} endpoint.
-•	Write the backend logic to execute the prompt from Section 7, enforcing the strict JSON schema.
-•	Write the Cypher MERGE query to insert the AI-generated nodes and edges into Neo4j.
-•	Wire the "Expand" button on the frontend to hit this endpoint, wait for the response, re-fetch the simulation data, and run it back through the dagre layout utility to update the canvas.
+```
 
+---
+
+## 4. Algorithmic Logic: UI State Calculation & Layout
+**Auto-Layout (Dagre):** When the frontend receives data, it maps the JSON into React Flow format, injecting a dummy `{ position: { x: 0, y: 0 } }` into every node. It then passes the array through a `getLayoutedElements(nodes, edges, direction = 'TB')` function utilizing `dagre` to automatically assign hierarchical X/Y coordinates.
+
+**The Traversal Ruleset (Calculated dynamically on the Frontend):**
+1. User defines the Root Node and its Initial State (Enum: `INCREASING` or `DECREASING`).
+2. The engine traverses outward ($N+1$) using a Breadth-First Search (BFS) approach.
+3. **Cycle Prevention:** Maintain a `Set` of visited node IDs. If a path encounters an already rendered node, draw the edge, but strictly terminate state calculation for that downstream branch to prevent infinite loops.
+4. **DIRECT Edge:** Target inherits the exact state of the Source. (e.g., Source `INCREASING` + `DIRECT` = Target `INCREASING` -> Render Green).
+5. **INVERSE Edge:** Target inherits the opposite state of the Source. (e.g., Source `INCREASING` + `INVERSE` = Target `DECREASING` -> Render Red).
+
+---
+
+## 5. UI/UX Elements & Interaction Flow
+**Single Canvas Rule:** Only one active simulation on the screen at a time. Starting a new simulation clears the React Flow state.
+
+**Visual Rules:**
+* Calculated `INCREASING` nodes/edges must have a distinct GREEN CSS class applied.
+* Calculated `DECREASING` nodes/edges must have a distinct RED CSS class applied.
+* **Edge Thickness:** Write a JS utility function `calculateEdgeWidth(impact_percentage)` that applies a logarithmic scale. Input is uncapped (e.g., 0.1 to 500.0). Output must be constrained between `1px` and `8px` for CSS `stroke-width`.
+
+**Interactions:**
+* **Node Interaction ("View More"):** `onNodeClick` event opens a Tailwind styled Side Panel. Display the `reasoning`, `impact_percentage`, and `time_horizon` of the edge leading *into* that node.
+* **Expansion (The "Expand" Button):** Inside the Side Panel. Triggers `POST /api/expand/{node_id}`. Awaits JSON response, appends new nodes/edges to current state, and completely re-runs the `dagre` layout function to re-sort the tree.
+
+---
+
+## 6. AI Prompting Strategy (Batch Optimized)
+**[AGENT DIRECTIVE - PROMPT RULE]:** Use this exact prompt string in the backend.
+
+```text
+You are an expert macroeconomist. Identify 5 macroeconomic factors structurally affected by a significant move in [Node Label]. 
+Do not include [List of existing neighbor labels]. 
+Determine if the causal relationship is DIRECT or INVERSE. 
+Estimate the 'impact_percentage' (realistic, un-capped numerical percentage). 
+Determine the 'time_horizon' (Short = 3 months, Medium = 2 years, Long = 10+ years). 
+Provide verbose reasoning. 
+Respond in strict JSON matching the required schema.
+```
+
+---
+
+## 7. Verbose Implementation Phasing (STRICT EXECUTION ORDER)
+**[AGENT DIRECTIVE]**: Execute these phases linearly. Provide the complete code for each phase and await user confirmation before starting the next.
+
+### Phase 1: Zero-API Scaffolding
+* Initialize Vite React TypeScript project. Install `reactflow`, `dagre`, `axios`, `tailwindcss`.
+* Initialize Python FastAPI project. Install `fastapi`, `uvicorn`, `pydantic`.
+* Create a basic layout: A top fixed nav-bar (for simulation input), and a main `div` occupying `100vw` and `calc(100vh - 64px)` housing the `<ReactFlow />` component.
+
+### Phase 2: The "v0" Static Mock Engine
+* **CRITICAL:** DO NOT hit external APIs.
+* In FastAPI, create a hardcoded Python dictionary representing a 15-node, 14-edge economic cascade matching the exact schema in Section 3.
+* Create a `GET /api/mock-simulation` endpoint. 
+* Have the React app fetch this on mount and render the basic nodes/edges. They will stack at x:0, y:0.
+
+### Phase 3: State Calculation & Auto-Layout
+* Create `layoutUtils.ts`. Write the `getLayoutedElements` function using `dagre`. Pass the fetched mock data through this before passing it to `setNodes` and `setEdges`.
+* Implement the BFS Traversal Ruleset in a `useEffect` hook. Hardcode the root node state as `INCREASING`.
+* Dynamically map the calculated Green/Red states and the logarithmic `stroke-width` to the React Flow node/edge styles.
+
+### Phase 4: Interaction Layer
+* Build the Slide-over Side Panel component.
+* Wire the `onNodeClick` event in React Flow to capture the node data and the incoming edge data.
+* Populate the Side Panel with the reasoning, time horizon, and impact metrics. Add a disabled "Expand" button.
+
+### Phase 5: Local Database Integration (NetworkX/SQLite)
+* **CRITICAL:** Do NOT set up Neo4j yet. Keep dependencies light.
+* Set up a basic SQLite database using Python's `sqlite3`. 
+* Use Python's `NetworkX` library to construct the graph logic in memory when the server boots.
+* Refactor the `GET` endpoint to traverse the SQLite/NetworkX graph instead of the static mock dictionary.
+
+### Phase 6: Simulation Initialization UI
+* Build the Top Nav Bar inputs: A text input for Node Label (e.g., "S&P 500") and a Select dropdown for UP/DOWN.
+* Wire the "Start Simulation" button. This must clear the React Flow canvas, reset the visited nodes set, send the query to the backend, fetch the new root graph, and trigger the layout engine.
+
+### Phase 7: The Resilient AI Brain (Gemini + Tenacity)
+* Install `google-generativeai` and `tenacity` in Python.
+* **CRITICAL:** Wrap the Gemini API call in a `@retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(5))` decorator to gracefully handle `429 Too Many Requests`.
+* Create `POST /api/expand/{node_id}`.
+* Implement the Batch Caching: Execute the Section 6 prompt. Parse the 5 generated relationships. Save ALL 5 to SQLite. Return ONLY 1 to the React frontend.
+* Wire the active "Expand" button on the frontend to hit this endpoint, append the result to `nodes`/`edges` state, and re-run the `dagre` layout.
+
+### Phase 8: Production Migration (Neo4j)
+* Install the Python `neo4j` bolt driver.
+* Replace SQLite read/write operations with Cypher `MERGE` and `MATCH` queries.
+* Ensure graph traversal (`MATCH path = (n)-[*1..3]->(m)`) formats the data to perfectly match the JSON contract in Section 3.
