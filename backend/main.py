@@ -98,3 +98,26 @@ async def get_simulation():
             }
         })
     return {"nodes": nodes, "edges": edges}
+
+@app.post("/api/start")
+async def start_simulation(payload: dict):
+    node_label = payload.get("node_label", "Root Node")
+    initial_state = payload.get("initial_state", "INCREASING")
+
+    # Return the mock cascade, but set the root node label to the user's input
+    nodes = [
+        {"id": f"node-{i}", "label": (node_label if i == 0 else f"Factor {i}")}
+        for i in range(15)
+    ]
+
+    edges = [
+        {"id": f"edge-{i}", "source": f"node-{i}", "target": f"node-{i+1}", "data": {
+            "base_direction": "DIRECT" if i % 2 == 0 else "INVERSE",
+            "impact_percentage": 5.0 + float(i),
+            "time_horizon": "Medium",
+            "reasoning": f"Economic chain reaction step {i}"
+        }} for i in range(14)
+    ]
+
+    return {"nodes": nodes, "edges": edges, "initial_state": initial_state}
+

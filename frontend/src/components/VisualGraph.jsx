@@ -16,31 +16,23 @@ const VisualGraph = () => {
   const [edges, setEdges] = useState([]);
   const [selectedNode, setSelectedNode] = useState(null);
 
-  const onNodeClick = useCallback((_, node) => {
-    console.log("Node clicked:", node);
-    // Directly access label from data if it exists, otherwise use top-level label
-    const label = node.data?.label || node.label;
+  const startSimulation = useCallback(async (node_label, initial_state) => {
+    try {
+      const response = await axios.post('http://localhost:8000/api/start', {
+        node_label,
+        initial_state
+      });
 
-    const incomingEdge = edges.find((e) => e.target === node.id);
-    setSelectedNode({
-      label: label,
-      edgeData: incomingEdge ? incomingEdge.data : null,
-    });
-  }, [edges]);
-
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const response = await axios.get('http://localhost:8000/api/mock-simulation');
         const { nodes: rawNodes, edges: rawEdges } = response.data;
+      const rootNodeId = rawNodes[0].id;
 
-        // BFS Engine to calculate states
-        const nodeStates = {};
-        const rootNodeId = rawNodes[0].id;
-        nodeStates[rootNodeId] = 'INCREASING';
+      // BFS Engine to calculate states starting from user's choice
+      const nodeStates = {};
+      nodeStates[rootNodeId] = initial_state;
         
         const queue = [rootNodeId];
         const visitedEdges = new Set();
+      const visitedNodes = new Set([rootNodeId]);
 
         while (queue.length > 0) {
           const sourceId = queue.shift();
@@ -56,12 +48,14 @@ const VisualGraph = () => {
               : (sourceState === 'INCREASING' ? 'DECREASING' : 'INCREASING');
             
             nodeStates[edge.target] = targetState;
+          if (!visitedNodes.has(edge.target)) {
+            visitedNodes.add(edge.target);
             queue.push(edge.target);
           }
         }
+      }
 
-        // Apply styles and layout
-        const styledNodes = rawNodes.map(node => ({
+      const styledNodes = rawNodes.map(node => ({
           ...node,
           data: { label: node.label, state: nodeStates[node.id] },
           style: {
@@ -70,35 +64,50 @@ const VisualGraph = () => {
             borderRadius: '8px',
             padding: '10px',
             width: 150,
+          cursor: 'pointer',
           },
         }));
 
-        const styledEdges = rawEdges.map(edge => {
-          const targetState = nodeStates[edge.target];
-          return {
+      const styledEdges = rawEdges.map(edge => ({
             ...edge,
             animated: true,
             style: {
-              stroke: targetState === 'INCREASING' ? '#22c55e' : '#ef4444',
+          stroke: nodeStates[edge.target] === 'INCREASING' ? '#22c55e' : '#ef4444',
               strokeWidth: calculateEdgeWidth(edge.data.impact_percentage),
             },
-          };
-        });
+      }));
 
         const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(styledNodes, styledEdges);
         
         setNodes(layoutedNodes);
         setEdges(layoutedEdges);
+      setSelectedNode(null);
       } catch (error) {
-        console.error("Error fetching/processing simulation:", error);
+      console.error("Error starting simulation:", error);
       }
-    };
-
-    fetchData();
   }, []);
 
+  useEffect(() => {
+    const handleStartSim = (e) => startSimulation(e.detail.node_label, e.detail.initial_state);
+    window.addEventListener('start-sim', handleStartSim);
+    return () => window.removeEventListener('start-sim', handleStartSim);
+  }, [startSimulation]);
+
+  const onNodeClick = useCallback((_, node) => {
+    console.log("Node clicked:", node);
+    // Directly access label from data if it exists, otherwise use top-level label
+    const label = node.data?.label || node.label;
+
+    const incomingEdge = edges.find((e) => e.target === node.id);
+    setSelectedNode({
+      label: label,
+      edgeData: incomingEdge ? incomingEdge.data : null,
+    });
+  }, [edges]);
+
   return (
-    <div className="flex-grow w-full h-full" style={{ height: '800px', display: 'flex' }}>
+    <div className="flex-grow w-full h-full relative overflow-hidden bg-gray-900">
+      <div style={{ height: '800px', display: 'flex' }}>
       <div style={{ flex: 1, position: 'relative' }}>
         <ReactFlow 
           nodes={nodes} 
@@ -114,24 +123,26 @@ const VisualGraph = () => {
       
       {/* Sidebar - fixed z-index and pointer-events */}
       {selectedNode && (
-        <div className="h-full w-80 bg-red-900 border-l border-gray-700 shadow-2xl p-6 text-white" style={{ position: 'static' }}>
+          <div className="absolute top-0 right-0 h-full w-80 z-[1000] bg-gray-900 border-l border-gray-700 shadow-2xl p-6 text-white pointer-events-auto">
           <button 
             onClick={() => setSelectedNode(null)} 
-            className="text-white p-4 font-bold"
+              className="mb-4 text-gray-400 hover:text-white"
           >
             ✕ CLOSE
           </button>
           <div className="p-6">
             <h1 className="text-2xl font-bold">{selectedNode.label}</h1>
-            <p className="mt-4">TESTING RENDER</p>
             {selectedNode.edgeData && (
-               <div className="mt-4 text-sm text-gray-300">
-                  <p>Reasoning: {selectedNode.edgeData.reasoning}</p>
+                 <div className="mt-6 text-sm text-gray-300 space-y-4">
+                    <p><strong>Reasoning:</strong> {selectedNode.edgeData.reasoning}</p>
+                    <p><strong>Impact:</strong> {selectedNode.edgeData.impact_percentage}%</p>
+                    <p><strong>Horizon:</strong> {selectedNode.edgeData.time_horizon}</p>
                </div>
             )}
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 };

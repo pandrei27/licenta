@@ -135,16 +135,18 @@ Respond in strict JSON matching the required schema.
 * Use Python's `NetworkX` library to construct the graph logic in memory when the server boots.
 * Refactor the `GET` endpoint to traverse the SQLite/NetworkX graph instead of the static mock dictionary.
 
-### Phase 6: Simulation Initialization UI
-* Build the Top Nav Bar inputs: A text input for Node Label (e.g., "S&P 500") and a Select dropdown for UP/DOWN.
-* Wire the "Start Simulation" button. This must clear the React Flow canvas, reset the visited nodes set, send the query to the backend, fetch the new root graph, and trigger the layout engine.
+### Phase 6: Simulation Initialization UI & Generative Start
+* Build the Top Nav Bar inputs: A text input for Node Label (e.g., "S&P 500", "High Inflation") and a Select dropdown for UP/DOWN.
+* Create a `POST /api/start` endpoint on the FastAPI backend. 
+* **The Logic:** When the user clicks "Start Simulation", the frontend clears the canvas and posts the input string to this endpoint. For Phase 6, have this endpoint temporarily return the static mock dictionary from Phase 2, but dynamically change the Root Node's label to match whatever text the user typed in. Trigger the `dagre` layout.
 
 ### Phase 7: The Resilient AI Brain (Gemini + Tenacity)
 * Install `google-generativeai` and `tenacity` in Python.
 * **CRITICAL:** Wrap the Gemini API call in a `@retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(5))` decorator to gracefully handle `429 Too Many Requests`.
 * Create `POST /api/expand/{node_id}`.
-* Implement the Batch Caching: Execute the Section 6 prompt. Parse the 5 generated relationships. Save ALL 5 to SQLite. Return ONLY 1 to the React frontend.
-* Wire the active "Expand" button on the frontend to hit this endpoint, append the result to `nodes`/`edges` state, and re-run the `dagre` layout.
+* **Integrate AI into Start & Expand:** * Update `POST /api/start`: Take the user's raw text input, send it to Gemini using the prompt in Section 6, parse the 5 generated relationships, cache them in SQLite, and return 1 to the frontend as the starting cascade.
+  * Update `POST /api/expand`: Do the exact same thing, but use the clicked node's label as the prompt input. 
+* Wire the active "Expand" button on the frontend Side Panel to hit the expand endpoint, append the result to `nodes`/`edges` state, and re-run the `dagre` layout.
 
 ### Phase 8: Production Migration (Neo4j)
 * Install the Python `neo4j` bolt driver.

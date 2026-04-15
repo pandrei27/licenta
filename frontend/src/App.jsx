@@ -10,16 +10,25 @@ function App() {
         <div className="flex items-center gap-4">
           <input 
             type="text" 
-            placeholder="What happens if [Node] goes..." 
+            id="root-node-input"
+            placeholder="Root Node (e.g. S&P 500)"
             className="px-4 py-2 rounded bg-gray-900 border border-gray-600 focus:outline-none focus:border-blue-500 w-80 text-white"
           />
           
-          <select className="px-4 py-2 rounded bg-gray-900 border border-gray-600 focus:outline-none focus:border-blue-500">
+          <select id="state-select" className="px-4 py-2 rounded bg-gray-900 border border-gray-600 focus:outline-none focus:border-blue-500 text-white">
             <option value="INCREASING">INCREASING</option>
             <option value="DECREASING">DECREASING</option>
           </select>
           
-          <button className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded font-semibold transition-colors">
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent('start-sim', {
+                detail: {
+                    node_label: document.getElementById('root-node-input').value,
+                    initial_state: document.getElementById('state-select').value
+                }
+            }))}
+            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded font-semibold transition-colors"
+          >
             Start Simulation
           </button>
         </div>
