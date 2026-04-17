@@ -42,7 +42,8 @@ if not GEMINI_API_KEY:
     logger.warning("⚠️  GEMINI_API_KEY is not set. AI endpoints (/start, /expand) will fail.")
 
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+# Updated model to gemini-3.1-flash-lite-preview
+gemini_model = genai.GenerativeModel("gemini-3.1-flash-lite-preview")
 
 # ──────────────────────────────────────────────
 # IN-MEMORY GRAPH ENGINE (NetworkX)
@@ -263,6 +264,10 @@ Output ONLY the JSON array.
     )
     
     raw = response.text.strip()
+    
+    # ADDED LOGGING: Inspect the raw return from the Gemini API
+    logger.info(f"🤖 Raw API Response:\n{raw}")
+
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
