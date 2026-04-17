@@ -1,18 +1,18 @@
 # PROJECT SPECIFICATION: CAUSAL-FLOW 
 **Subtitle:** Autonomous Macroeconomic Reasoning Engine & Market Dynamics Analyzer
 
-**[GLOBAL AGENT DIRECTIVE]** You are an autonomous coding agent executing a strict, phased development plan. Your primary constraint is **API Rate Limit Preservation** and **Deterministic UI Stability**. 
+**[GLOBAL AGENT DIRECTIVE]** You are an autonomous coding agent executing a strict, phased development plan. Your primary constraint is **API Rate Limit Preservation**, **Rapid Backend Execution**, and **Deterministic UI Stability**. 
 1. DO NOT hallucinate external libraries outside the approved stack.
-2. DO NOT implement database persistence (Neo4j) or live AI API calls (Gemini) until explicitly instructed in Phase 5 and Phase 7. 
+2. DO NOT implement live AI API calls (Gemini) until explicitly instructed in Phase 7. 
 3. DO NOT skip phases. You must verify the functional completion of the current phase before moving to the next.
+4. **NO NEO4J:** The system will rely entirely on SQLite + NetworkX for fast development and easy deployment. Do not write Cypher queries or setup Neo4j drivers.
 
 ---
 
 ## 1. System Architecture & Tech Stack
 * **Frontend:** React 18, Vite (`react-ts` template), React Flow (for DAG visualization), TailwindCSS (for styling), Dagre (for mathematical directed graph layout).
 * **Backend:** Python 3.11+, FastAPI, Uvicorn.
-* **Prototyping Data Layer:** In-memory SQLite + Python `NetworkX` library (for rapid graph math and caching).
-* **Production Data Layer:** Neo4j Desktop (Local graph database, `bolt://localhost:7687`).
+* **Data & Math Layer:** Local SQLite + Python `NetworkX` library. SQLite acts as the persistent cache, and NetworkX is used to build the graph in RAM for rapid traversal, cycle detection, and sub-graph extraction.
 * **AI Integration:** Google Gemini API (`google-generativeai`), utilizing strict `response_mime_type="application/json"`.
 
 ---
@@ -22,7 +22,7 @@ Logic is stored exclusively on the Edges. Traversal is strictly unidirectional (
 
 **Nodes (Entity Model):**
 * `id`: UUID4 (String)
-* `label`: String (e.g., "10-Year Treasury Yield")
+* `label`: String (e.g., "S&P 500", "Interest Rates")
 
 **Edges (Relationship Model):**
 * `source_id`: UUID4
@@ -34,10 +34,13 @@ Logic is stored exclusively on the Edges. Traversal is strictly unidirectional (
 
 ---
 
-## 3. API Data Contracts & Caching Logic (FastAPI $\leftrightarrow$ React)
+## 3. API Data Contracts & Generative Logic (FastAPI $\leftrightarrow$ React)
 **Separation of Concerns:** The backend API serves only semantic graph data. It does NOT calculate or serve UI X/Y coordinates. 
 
-**[AGENT DIRECTIVE - BATCH CACHING]:** To circumvent AI API rate limits, the backend `/api/expand` endpoint will request $N=5$ relationships from the LLM at once. However, it will only return $N=1$ new node to the frontend per click. The remaining 4 nodes MUST be cached in SQLite/NetworkX. On subsequent requests, the backend MUST check the local cache before calling the Gemini API.
+**[AGENT DIRECTIVE - GENERATIVE RULES]:** To optimize for fast development and immediate visual feedback on the frontend, the generative generation counts are strictly defined:
+* **Simulation Start:** When initializing a brand new simulation, the backend must query the LLM to generate exactly **3 child nodes** for the specified root asset. All 3 are returned to the frontend.
+* **Node Expansion:** When clicking "Expand" on an existing node, the backend must query the LLM to generate exactly **2 child nodes**. Both are returned to the frontend.
+* **Caching:** All LLM generations must be saved to SQLite. If a user requests an expansion that already exists in the database for that specific node, the backend should return the cached relationships instead of querying Gemini to save API limits.
 
 **GET /api/simulation/{node_id}**
 Returns the sub-graph needed for visualization.
@@ -69,7 +72,7 @@ Returns the sub-graph needed for visualization.
 
 **The Traversal Ruleset (Calculated dynamically on the Frontend):**
 1. User defines the Root Node and its Initial State (Enum: `INCREASING` or `DECREASING`).
-2. The engine traverses outward ($N+1$) using a Breadth-First Search (BFS) approach.
+2. The engine traverses outward using a Breadth-First Search (BFS) approach.
 3. **Cycle Prevention:** Maintain a `Set` of visited node IDs. If a path encounters an already rendered node, draw the edge, but strictly terminate state calculation for that downstream branch to prevent infinite loops.
 4. **DIRECT Edge:** Target inherits the exact state of the Source. (e.g., Source `INCREASING` + `DIRECT` = Target `INCREASING` -> Render Green).
 5. **INVERSE Edge:** Target inherits the opposite state of the Source. (e.g., Source `INCREASING` + `INVERSE` = Target `DECREASING` -> Render Red).
@@ -90,11 +93,11 @@ Returns the sub-graph needed for visualization.
 
 ---
 
-## 6. AI Prompting Strategy (Batch Optimized)
-**[AGENT DIRECTIVE - PROMPT RULE]:** Use this exact prompt string in the backend.
+## 6. AI Prompting Strategy (Dynamic Batching)
+**[AGENT DIRECTIVE - PROMPT RULE]:** Use this exact prompt string template in the backend. Replace `{N}` dynamically based on the endpoint (`3` for `/start`, `2` for `/expand`).
 
 ```text
-You are an expert macroeconomist. Identify 5 macroeconomic factors structurally affected by a significant move in [Node Label]. 
+You are an expert macroeconomist. Identify exactly {N} macroeconomic factors structurally affected by a significant move in [Node Label]. 
 Do not include [List of existing neighbor labels]. 
 Determine if the causal relationship is DIRECT or INVERSE. 
 Estimate the 'impact_percentage' (realistic, un-capped numerical percentage). 
@@ -115,7 +118,7 @@ Respond in strict JSON matching the required schema.
 
 ### Phase 2: The "v0" Static Mock Engine
 * **CRITICAL:** DO NOT hit external APIs.
-* In FastAPI, create a hardcoded Python dictionary representing a 15-node, 14-edge economic cascade matching the exact schema in Section 3.
+* In FastAPI, create a hardcoded Python dictionary representing a simple starting cascade: 1 Root Node, 3 Child nodes attached to the root, and 2 deeper children attached to one of the first children. Match the exact schema in Section 3.
 * Create a `GET /api/mock-simulation` endpoint. 
 * Have the React app fetch this on mount and render the basic nodes/edges. They will stack at x:0, y:0.
 
@@ -130,13 +133,13 @@ Respond in strict JSON matching the required schema.
 * Populate the Side Panel with the reasoning, time horizon, and impact metrics. Add a disabled "Expand" button.
 
 ### Phase 5: Local Database Integration (NetworkX/SQLite)
-* **CRITICAL:** Do NOT set up Neo4j yet. Keep dependencies light.
-* Set up a basic SQLite database using Python's `sqlite3`. 
-* Use Python's `NetworkX` library to construct the graph logic in memory when the server boots.
+* **CRITICAL:** This is the final data layer. Do not set up Neo4j.
+* Set up a basic SQLite database using Python's `sqlite3` or SQLAlchemy. Create tables for `nodes` and `edges`.
+* Use Python's `NetworkX` library to construct the graph logic in memory. Write helper functions to easily extract subgraphs and format them into the JSON schema expected by the frontend.
 * Refactor the `GET` endpoint to traverse the SQLite/NetworkX graph instead of the static mock dictionary.
 
 ### Phase 6: Simulation Initialization UI & Generative Start
-* Build the Top Nav Bar inputs: A text input for Node Label (e.g., "S&P 500", "High Inflation") and a Select dropdown for UP/DOWN.
+* Build the Top Nav Bar inputs: A text input for Node Label (e.g., "S&P 500") and a Select dropdown for UP/DOWN.
 * Create a `POST /api/start` endpoint on the FastAPI backend. 
 * **The Logic:** When the user clicks "Start Simulation", the frontend clears the canvas and posts the input string to this endpoint. For Phase 6, have this endpoint temporarily return the static mock dictionary from Phase 2, but dynamically change the Root Node's label to match whatever text the user typed in. Trigger the `dagre` layout.
 
@@ -144,6 +147,6 @@ Respond in strict JSON matching the required schema.
 * Install `google-generativeai` and `tenacity` in Python.
 * **CRITICAL:** Wrap the Gemini API call in a `@retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(5))` decorator to gracefully handle `429 Too Many Requests`.
 * Create `POST /api/expand/{node_id}`.
-* **Integrate AI into Start & Expand:** * Update `POST /api/start`: Take the user's raw text input, send it to Gemini using the prompt in Section 6, parse the 5 generated relationships, cache them in SQLite, and return 1 to the frontend as the starting cascade.
-  * Update `POST /api/expand`: Do the exact same thing, but use the clicked node's label as the prompt input. 
-* Wire the active "Expand" button on the frontend Side Panel to hit the expand endpoint, append the result to `nodes`/`edges` state, and re-run the `dagre` layout.
+* **Integrate AI into Start & Expand:** * Update `POST /api/start`: Take the user's raw text input, send it to Gemini using the prompt in Section 6 asking for exactly **3 factors**, parse the 3 generated relationships, cache them in SQLite, and return the Root Node + the 3 child nodes/edges to the frontend.
+  * Update `POST /api/expand`: Take the clicked node's label, send it to Gemini asking for exactly **2 factors**, cache them in SQLite, and return the 2 new nodes/edges. 
+* Wire the active "Expand" button on the frontend Side Panel to hit the expand endpoint, append the result to the existing `nodes`/`edges` state, and completely re-run the `dagre` layout to fit the new additions.
