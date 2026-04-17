@@ -17,7 +17,9 @@ const VisualGraph = () => {
   const [selectedNode, setSelectedNode] = useState(null);
 
   const onNodeClick = useCallback((_, node) => {
-    const label = node.data?.label || node.label;
+    // FIX: Access the label from node.data.label, which is where the API puts it
+    const label = node.data?.label || "Unknown";
+    console.log("Clicked Node:", node);
     const incomingEdge = edges.find((e) => e.target === node.id);
     setSelectedNode({
       id: node.id,
@@ -33,7 +35,8 @@ const VisualGraph = () => {
         existing_labels: nodes.map(n => n.data?.label)
       });
 
-      const newNodes = response.data.nodes.map(n => ({...n, data: {label: n.label}}));
+      // FIX: Ensure new nodes correctly set data.label
+      const newNodes = response.data.nodes.map(n => ({...n, data: {label: n.data?.label || n.label}}));
       const newEdges = response.data.edges.map(e => ({
         ...e,
         animated: true,
@@ -93,7 +96,8 @@ const VisualGraph = () => {
 
       const styledNodes = rawNodes.map(node => ({
           ...node,
-          data: { label: node.label, state: nodeStates[node.id] },
+          // FIX: Correctly map data.label
+          data: { label: node.data?.label || node.label, state: nodeStates[node.id] },
           style: {
             background: nodeStates[node.id] === 'INCREASING' ? '#dcfce7' : '#fee2e2',
             border: `1px solid ${nodeStates[node.id] === 'INCREASING' ? '#22c55e' : '#ef4444'}`,
