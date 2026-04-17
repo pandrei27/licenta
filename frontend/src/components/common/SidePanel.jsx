@@ -1,8 +1,8 @@
-const SidePanel = ({ nodeData, onClose }) => {
+const SidePanel = ({ nodeData, onClose, onExpand }) => {
   if (!nodeData) return null;
 
   return (
-    <div className="absolute top-0 right-0 h-full w-80 bg-gray-800 border-l border-gray-700 p-6 shadow-xl z-10">
+    <div className="h-full w-80 bg-gray-900 border-l border-gray-700 p-6 shadow-2xl flex flex-col z-[1000] overflow-y-auto">
       <button onClick={onClose} className="text-gray-400 hover:text-white mb-4">✕ Close</button>
       <h2 className="text-xl font-bold text-white mb-4">{nodeData.label}</h2>
       
@@ -22,10 +22,10 @@ const SidePanel = ({ nodeData, onClose }) => {
           </div>
           
           <button 
-            disabled
-            className="w-full mt-6 py-2 bg-gray-600 text-gray-400 rounded cursor-not-allowed text-sm"
-          >
-            Expand (Phase 7)
+            onClick={onExpand}
+            className="w-full mt-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"
+        >
+            Expand Node
           </button>
         </div>
       )}

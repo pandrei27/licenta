@@ -16,6 +16,42 @@ const VisualGraph = () => {
   const [edges, setEdges] = useState([]);
   const [selectedNode, setSelectedNode] = useState(null);
 
+  const onNodeClick = useCallback((_, node) => {
+    const label = node.data?.label || node.label;
+    const incomingEdge = edges.find((e) => e.target === node.id);
+    setSelectedNode({
+      id: node.id,
+      label: label,
+      edgeData: incomingEdge ? incomingEdge.data : null,
+    });
+  }, [edges]);
+
+  const handleExpand = async () => {
+    try {
+      const response = await axios.post(`http://localhost:8000/api/expand/${selectedNode.id}`, {
+        label: selectedNode.label,
+        existing_labels: nodes.map(n => n.data?.label)
+      });
+
+      const newNodes = response.data.nodes.map(n => ({...n, data: {label: n.label}}));
+      const newEdges = response.data.edges.map(e => ({
+        ...e,
+        animated: true,
+        style: { stroke: '#ef4444', strokeWidth: 2 }
+      }));
+
+      const combinedNodes = [...nodes, ...newNodes];
+      const combinedEdges = [...edges, ...newEdges];
+      const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(combinedNodes, combinedEdges);
+
+      setNodes(layoutedNodes);
+      setEdges(layoutedEdges);
+      setSelectedNode(null);
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const startSimulation = useCallback(async (node_label, initial_state) => {
     try {
       const response = await axios.post('http://localhost:8000/api/start', {
@@ -43,8 +79,8 @@ const VisualGraph = () => {
             if (visitedEdges.has(edge.id)) continue;
             visitedEdges.add(edge.id);
 
-            const targetState = edge.data.base_direction === 'DIRECT' 
-              ? sourceState 
+            const targetState = edge.data.base_direction === 'DIRECT'
+              ? sourceState
               : (sourceState === 'INCREASING' ? 'DECREASING' : 'INCREASING');
             
             nodeStates[edge.target] = targetState;
@@ -93,25 +129,12 @@ const VisualGraph = () => {
     return () => window.removeEventListener('start-sim', handleStartSim);
   }, [startSimulation]);
 
-  const onNodeClick = useCallback((_, node) => {
-    console.log("Node clicked:", node);
-    // Directly access label from data if it exists, otherwise use top-level label
-    const label = node.data?.label || node.label;
-
-    const incomingEdge = edges.find((e) => e.target === node.id);
-    setSelectedNode({
-      label: label,
-      edgeData: incomingEdge ? incomingEdge.data : null,
-    });
-  }, [edges]);
-
   return (
-    <div className="flex-grow w-full h-full relative overflow-hidden bg-gray-900">
-      <div style={{ height: '800px', display: 'flex' }}>
+    <div className="flex-grow w-full h-full" style={{ height: '800px', display: 'flex' }}>
       <div style={{ flex: 1, position: 'relative' }}>
-        <ReactFlow 
-          nodes={nodes} 
-          edges={edges} 
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
           onNodeClick={onNodeClick}
           fitView
         >
@@ -120,29 +143,16 @@ const VisualGraph = () => {
           <MiniMap />
         </ReactFlow>
       </div>
-      
-      {/* Sidebar - fixed z-index and pointer-events */}
+
       {selectedNode && (
-          <div className="absolute top-0 right-0 h-full w-80 z-[1000] bg-gray-900 border-l border-gray-700 shadow-2xl p-6 text-white pointer-events-auto">
-          <button 
-            onClick={() => setSelectedNode(null)} 
-              className="mb-4 text-gray-400 hover:text-white"
-          >
-            ✕ CLOSE
-          </button>
-          <div className="p-6">
-            <h1 className="text-2xl font-bold">{selectedNode.label}</h1>
-            {selectedNode.edgeData && (
-                 <div className="mt-6 text-sm text-gray-300 space-y-4">
-                    <p><strong>Reasoning:</strong> {selectedNode.edgeData.reasoning}</p>
-                    <p><strong>Impact:</strong> {selectedNode.edgeData.impact_percentage}%</p>
-                    <p><strong>Horizon:</strong> {selectedNode.edgeData.time_horizon}</p>
-               </div>
-            )}
-          </div>
+        <div style={{ position: 'static' }}>
+          <SidePanel
+            nodeData={selectedNode}
+            onClose={() => setSelectedNode(null)}
+            onExpand={handleExpand}
+          />
         </div>
       )}
-    </div>
     </div>
   );
 };
