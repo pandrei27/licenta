@@ -238,12 +238,19 @@ def _call_gemini_sync(node_label: str, existing_labels: list[str], n_count: int)
     existing_str = ", ".join(existing_labels) if existing_labels else "none"
     
     prompt = f"""
-You are an expert macroeconomist. Identify exactly {n_count} macroeconomic factors structurally affected by a significant move in {node_label}. 
-Do not include {existing_str}. 
-Determine if the causal relationship is DIRECT or INVERSE. 
-Estimate the 'impact_percentage' (realistic, un-capped numerical percentage). 
-Determine the 'time_horizon' (Short = 3 months, Medium = 2 years, Long = 10+ years). 
-Provide verbose reasoning. 
+You are a world-class Global Macro Strategist and Multi-Asset Correlation Specialist. 
+Identify exactly {n_count} specific financial assets, commodity benchmarks, or market indices (e.g., Gold, USD Index, Crude Oil, S&P 500, Treasury Yields) that are most structurally affected by a significant move in {node_label}. 
+
+While macroeconomic factors may be included, prioritize highly-correlated tradable instruments and price-action benchmarks.
+
+Do not include any of the following already existing factors: {existing_str}. 
+
+For each identified asset:
+1. Determine if the causal relationship is DIRECT (moves in the same direction) or INVERSE (moves in the opposite direction). 
+2. Estimate the 'impact_percentage' (a realistic, un-capped numerical percentage reflecting the magnitude of the move). 
+3. Determine the 'time_horizon' based on the standard flow: Short (3 months), Medium (2 years), or Long (10+ years). 
+4. Provide verbose reasoning explaining the fundamental market mechanics (e.g., liquidity flows, safe-haven status, or cost-push relationships).
+
 Respond in strict JSON matching the required schema: a JSON array of exactly {n_count} objects.
 [
   {{
