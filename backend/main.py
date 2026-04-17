@@ -4,15 +4,16 @@
 import json
 import logging
 import os
+import sqlite3
 import uuid
 import asyncio
 from contextlib import asynccontextmanager
-from typing import Any, Optional
+from typing import Any, Optional, Tuple, List
 
+import networkx as nx
 import google.generativeai as genai
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from neo4j import AsyncGraphDatabase, AsyncDriver
 from pydantic import BaseModel, Field, field_validator
 from tenacity import (
     retry,
@@ -34,49 +35,31 @@ logger = logging.getLogger("CAUSAL-FLOW")
 # ──────────────────────────────────────────────
 # ENVIRONMENT CONFIGURATION
 # ──────────────────────────────────────────────
-# Set these in your shell or a .env file loaded by python-dotenv:
-#   export GEMINI_API_KEY="..."
-#   export NEO4J_URI="bolt://localhost:7687"
-#   export NEO4J_USER="neo4j"
-#   export NEO4J_PASSWORD="your-password"
-
 GEMINI_API_KEY: str = os.environ.get("GEMINI_API_KEY", "")
-NEO4J_URI: str      = os.environ.get("NEO4J_URI",      "bolt://localhost:7687")
-NEO4J_USER: str     = os.environ.get("NEO4J_USER",     "neo4j")
-NEO4J_PASSWORD: str = os.environ.get("NEO4J_PASSWORD", "password")
+DB_PATH = "causal_flow.db"
 
 if not GEMINI_API_KEY:
-    logger.warning(
-        "⚠️  GEMINI_API_KEY is not set. AI endpoints (/start, /expand) will fail."
-    )
+    logger.warning("⚠️  GEMINI_API_KEY is not set. AI endpoints (/start, /expand) will fail.")
 
-# ──────────────────────────────────────────────
-# GEMINI CLIENT INITIALISATION
-# ──────────────────────────────────────────────
-# Using gemini-2.0-flash as a fast, cost-effective model.
-# Swap to "gemini-1.5-pro" for higher-quality reasoning if budget allows.
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 # ──────────────────────────────────────────────
-# NEO4J ASYNC DRIVER — Module-level singleton
+# IN-MEMORY GRAPH ENGINE (NetworkX)
 # ──────────────────────────────────────────────
-# We hold one driver for the lifetime of the process and close it on shutdown.
-neo4j_driver: Optional[AsyncDriver] = None
+# Holds the active graph state in RAM for instant BFS traversal.
+# Synchronized with SQLite on every write.
+GRAPH = nx.DiGraph()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PYDANTIC MODELS
 # ──────────────────────────────────────────────────────────────────────────────
-
 class AiRelationship(BaseModel):
-    """
-    Represents one causal relationship as returned by the Gemini AI.
-    Used to validate and parse each item in the AI's JSON array response.
-    """
-    label: str = Field(..., description="Human-readable label for the target macroeconomic node")
+    """Represents one causal relationship returned by the Gemini AI."""
+    label: str = Field(..., description="Target macroeconomic node label")
     base_direction: str = Field(..., description="DIRECT or INVERSE")
-    impact_percentage: float = Field(..., description="Estimated real-world percentual impact, uncapped")
+    impact_percentage: float = Field(..., description="Estimated real-world percentual impact")
     time_horizon: str = Field(..., description="Short | Medium | Long")
     reasoning: str = Field(..., description="Verbose economic theory explanation")
 
@@ -84,314 +67,183 @@ class AiRelationship(BaseModel):
     @classmethod
     def validate_direction(cls, v: str) -> str:
         if v not in ("DIRECT", "INVERSE"):
-            raise ValueError(f"base_direction must be 'DIRECT' or 'INVERSE', got '{v}'")
+            raise ValueError("base_direction must be 'DIRECT' or 'INVERSE'")
         return v
 
     @field_validator("time_horizon")
     @classmethod
     def validate_horizon(cls, v: str) -> str:
         if v not in ("Short", "Medium", "Long"):
-            raise ValueError(f"time_horizon must be 'Short', 'Medium', or 'Long', got '{v}'")
+            raise ValueError("time_horizon must be 'Short', 'Medium', or 'Long'")
         return v
-
 
 class StartSimulationRequest(BaseModel):
-    """Payload for POST /api/start"""
-    node_label: str = Field(..., min_length=1, description="Root node label, e.g. 'Federal Funds Rate'")
-    initial_state: str = Field(
-        default="INCREASING",
-        description="INCREASING or DECREASING — drives BFS state colouring on the frontend",
-    )
-
-    @field_validator("initial_state")
-    @classmethod
-    def validate_state(cls, v: str) -> str:
-        if v not in ("INCREASING", "DECREASING"):
-            raise ValueError("initial_state must be 'INCREASING' or 'DECREASING'")
-        return v
-
+    node_label: str = Field(..., min_length=1)
+    initial_state: str = Field(default="INCREASING")
 
 class ExpandNodeRequest(BaseModel):
-    """Payload for POST /api/expand/{node_id}"""
-    label: str = Field(..., min_length=1, description="Label of the node being expanded")
-    existing_labels: list[str] = Field(
-        default_factory=list,
-        description="Labels already on the canvas — AI must not repeat these",
+    label: str = Field(..., min_length=1)
+    existing_labels: list[str] = Field(default_factory=list)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SQLITE & NETWORKX CORE FUNCTIONS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_db_connection() -> sqlite3.Connection:
+    """Returns a configured SQLite connection."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """Initializes the SQLite database schema if it doesn't exist."""
+    with get_db_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS nodes (
+                id TEXT PRIMARY KEY,
+                label TEXT UNIQUE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS edges (
+                id TEXT PRIMARY KEY,
+                source_id TEXT,
+                target_id TEXT,
+                base_direction TEXT,
+                impact_percentage REAL,
+                time_horizon TEXT,
+                reasoning TEXT,
+                FOREIGN KEY(source_id) REFERENCES nodes(id),
+                FOREIGN KEY(target_id) REFERENCES nodes(id)
+            )
+        """)
+        conn.commit()
+
+def load_graph_to_memory():
+    """Loads the entire SQLite database into the NetworkX DiGraph."""
+    GRAPH.clear()
+    with get_db_connection() as conn:
+        for row in conn.execute("SELECT * FROM nodes"):
+            GRAPH.add_node(row["id"], label=row["label"])
+        for row in conn.execute("SELECT * FROM edges"):
+            GRAPH.add_edge(row["source_id"], row["target_id"], **dict(row))
+    logger.info(f"Loaded graph into RAM: {GRAPH.number_of_nodes()} nodes, {GRAPH.number_of_edges()} edges.")
+
+def get_or_create_node(conn: sqlite3.Connection, label: str) -> str:
+    """Gets a node ID by label, or creates it if it doesn't exist."""
+    cur = conn.execute("SELECT id FROM nodes WHERE label = ?", (label,))
+    row = cur.fetchone()
+    if row:
+        return row["id"]
+    
+    new_id = str(uuid.uuid4())
+    conn.execute("INSERT INTO nodes (id, label) VALUES (?, ?)", (new_id, label))
+    GRAPH.add_node(new_id, label=label)
+    return new_id
+
+def insert_edge(conn: sqlite3.Connection, source_id: str, target_id: str, rel: AiRelationship) -> str:
+    """Inserts a new edge into SQLite and synchronizes NetworkX."""
+    edge_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO edges (id, source_id, target_id, base_direction, impact_percentage, time_horizon, reasoning)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (edge_id, source_id, target_id, rel.base_direction, rel.impact_percentage, rel.time_horizon, rel.reasoning))
+    
+    GRAPH.add_edge(
+        source_id, target_id, id=edge_id, source_id=source_id, target_id=target_id,
+        base_direction=rel.base_direction, impact_percentage=rel.impact_percentage,
+        time_horizon=rel.time_horizon, reasoning=rel.reasoning
     )
+    return edge_id
 
+def get_cached_outgoing_edges(source_id: str) -> Tuple[List[dict], List[dict]]:
+    """Checks if a node already has outgoing edges to prevent duplicate API calls."""
+    if source_id not in GRAPH:
+        return [], []
+    
+    out_edges = list(GRAPH.out_edges(source_id, data=True))
+    if not out_edges:
+        return [], []
 
-# ──────────────────────────────────────────────────────────────────────────────
-# NEO4J HELPER FUNCTIONS
-# ──────────────────────────────────────────────────────────────────────────────
-
-async def get_driver() -> AsyncDriver:
-    """
-    Returns the module-level Neo4j async driver.
-    Raises a 503 if the driver was never initialised (e.g. Neo4j is unreachable).
-    """
-    if neo4j_driver is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Neo4j driver is not initialised. Check NEO4J_URI / credentials.",
-        )
-    return neo4j_driver
-
-
-async def neo4j_merge_node(driver: AsyncDriver, node_id: str, label: str) -> None:
-    """
-    Idempotently upsert a Node into Neo4j.
-    MERGE ensures no duplicates even if the same node is generated by multiple AI calls.
-    """
-    cypher = """
-        MERGE (n:EconomicFactor {id: $id})
-        ON CREATE SET n.label = $label
-        ON MATCH  SET n.label = $label
-    """
-    async with driver.session() as session:
-        await session.run(cypher, id=node_id, label=label)
-
-
-async def neo4j_merge_edge(
-    driver: AsyncDriver,
-    edge_id: str,
-    source_id: str,
-    target_id: str,
-    base_direction: str,
-    impact_percentage: float,
-    time_horizon: str,
-    reasoning: str,
-) -> None:
-    """
-    Idempotently upsert a CAUSES relationship between two EconomicFactor nodes.
-
-    The edge id is stored as a property so we can retrieve and expose it to the
-    React Flow frontend without ambiguity.
-    """
-    cypher = """
-        MATCH (src:EconomicFactor {id: $source_id})
-        MATCH (tgt:EconomicFactor {id: $target_id})
-        MERGE (src)-[r:CAUSES {id: $edge_id}]->(tgt)
-        ON CREATE SET
-            r.base_direction    = $base_direction,
-            r.impact_percentage = $impact_percentage,
-            r.time_horizon      = $time_horizon,
-            r.reasoning         = $reasoning,
-            r.served            = false
-        ON MATCH SET
-            r.base_direction    = $base_direction,
-            r.impact_percentage = $impact_percentage,
-            r.time_horizon      = $time_horizon,
-            r.reasoning         = $reasoning
-    """
-    async with driver.session() as session:
-        await session.run(
-            cypher,
-            edge_id=edge_id,
-            source_id=source_id,
-            target_id=target_id,
-            base_direction=base_direction,
-            impact_percentage=impact_percentage,
-            time_horizon=time_horizon,
-            reasoning=reasoning,
-        )
-
-
-async def neo4j_pop_cached_edge(
-    driver: AsyncDriver, source_id: str
-) -> Optional[dict[str, Any]]:
-    """
-    ─── BATCH CACHE READ ───────────────────────────────────────────────────────
-    Checks Neo4j for an unserved (cached) outgoing relationship from `source_id`.
-    Returns the first match and marks it as served=true so it won't be returned
-    a second time.
-
-    This is the core of the "ask for 5, return 1" cache strategy:
-      • /api/expand first checks here.
-      • Only if the cache is empty does it call the Gemini API.
-    ────────────────────────────────────────────────────────────────────────────
-    """
-    cypher = """
-        MATCH (src:EconomicFactor {id: $source_id})-[r:CAUSES {served: false}]->(tgt:EconomicFactor)
-        WITH src, r, tgt LIMIT 1
-        SET r.served = true
-        RETURN
-            tgt.id    AS target_id,
-            tgt.label AS target_label,
-            r.id      AS edge_id,
-            r.base_direction    AS base_direction,
-            r.impact_percentage AS impact_percentage,
-            r.time_horizon      AS time_horizon,
-            r.reasoning         AS reasoning
-    """
-    async with driver.session() as session:
-        result = await session.run(cypher, source_id=source_id)
-        record = await result.single()
-        if record is None:
-            return None
-        return dict(record)
-
-
-async def neo4j_get_subgraph(
-    driver: AsyncDriver, root_id: str, depth: int = 3
-) -> tuple[list[dict], list[dict]]:
-    """
-    Retrieve the subgraph reachable from `root_id` up to `depth` hops.
-    Used by GET /api/simulation/{node_id} so the frontend can reconstruct
-    a partial view of the stored graph.
-    """
-    cypher = """
-        MATCH path = (root:EconomicFactor {id: $root_id})-[:CAUSES*0..3]->(n)
-        UNWIND nodes(path)        AS node
-        UNWIND relationships(path) AS rel
-        RETURN DISTINCT
-            node.id    AS node_id,
-            node.label AS node_label,
-            startNode(rel).id       AS src,
-            endNode(rel).id         AS tgt,
-            rel.id                  AS edge_id,
-            rel.base_direction      AS base_direction,
-            rel.impact_percentage   AS impact_percentage,
-            rel.time_horizon        AS time_horizon,
-            rel.reasoning           AS reasoning
-    """
-    nodes_seen: dict[str, dict] = {}
-    edges_seen: dict[str, dict] = {}
-
-    async with driver.session() as session:
-        result = await session.run(cypher, root_id=root_id)
-        async for record in result:
-            nid = record["node_id"]
-            if nid and nid not in nodes_seen:
-                nodes_seen[nid] = {"id": nid, "data": {"label": record["node_label"]}}
-
-            eid = record["edge_id"]
-            if eid and eid not in edges_seen:
-                edges_seen[eid] = {
-                    "id": eid,
-                    "source": record["src"],
-                    "target": record["tgt"],
-                    "data": {
-                        "base_direction":    record["base_direction"],
-                        "impact_percentage": record["impact_percentage"],
-                        "time_horizon":      record["time_horizon"],
-                        "reasoning":         record["reasoning"],
-                    },
-                }
-
-    return list(nodes_seen.values()), list(edges_seen.values())
-
-
-async def neo4j_label_exists(driver: AsyncDriver, label: str) -> Optional[str]:
-    """
-    Returns the node id if a node with this exact label already exists, else None.
-    Used by /api/start to avoid creating a duplicate root node.
-    """
-    cypher = "MATCH (n:EconomicFactor {label: $label}) RETURN n.id AS id LIMIT 1"
-    async with driver.session() as session:
-        result = await session.run(cypher, label=label)
-        record = await result.single()
-        return record["id"] if record else None
-
+    nodes = []
+    edges = []
+    for u, v, data in out_edges:
+        nodes.append({"id": v, "data": {"label": GRAPH.nodes[v]["label"]}})
+        edges.append({
+            "id": data["id"],
+            "source": u,
+            "target": v,
+            "data": {
+                "base_direction": data["base_direction"],
+                "impact_percentage": data["impact_percentage"],
+                "time_horizon": data["time_horizon"],
+                "reasoning": data["reasoning"]
+            }
+        })
+    return nodes, edges
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SEED DATA (Phase 2 mock, persisted to Neo4j on first boot)
+# SEED DATA (Phase 2 Mock)
 # ──────────────────────────────────────────────────────────────────────────────
-
-SEED_NODES = [
-    ("node-0",  "Federal Funds Rate"),   ("node-1",  "Mortgage Rates"),
-    ("node-2",  "Housing Demand"),       ("node-3",  "Construction Activity"),
-    ("node-4",  "Job Market"),           ("node-5",  "Consumer Spending"),
-    ("node-6",  "Inflation"),            ("node-7",  "Treasury Yields"),
-    ("node-8",  "Stock Market"),         ("node-9",  "Corporate Investment"),
-    ("node-10", "USD Value"),            ("node-11", "Import Prices"),
-    ("node-12", "Export Competitiveness"),("node-13","GDP Growth"),
-    ("node-14", "Real Estate Prices"),
-]
-
-SEED_EDGES = [
-    {
-        "id": f"edge-{i}",
-        "source_id": f"node-{i}",
-        "target_id": f"node-{i+1}",
-        "base_direction": "DIRECT" if i % 2 == 0 else "INVERSE",
-        "impact_percentage": 5.0 + float(i),
-        "time_horizon": "Medium",
-        "reasoning": (
-            f"Seed relationship #{i}: A significant change in node-{i} causes a cascading "
-            f"{'direct' if i % 2 == 0 else 'inverse'} effect on node-{i+1} through standard "
-            "macroeconomic transmission mechanisms."
-        ),
-    }
-    for i in range(14)
-]
-
-
-async def seed_neo4j_if_empty(driver: AsyncDriver) -> None:
-    """
-    On startup, check whether the graph is empty.  If so, write the 15-node
-    seed graph so that GET /api/mock-simulation works without any AI calls.
-    """
-    async with driver.session() as session:
-        result = await session.run("MATCH (n:EconomicFactor) RETURN count(n) AS c")
-        record = await result.single()
-        if record and record["c"] > 0:
-            logger.info("Neo4j already contains data — skipping seed.")
+def seed_db_if_empty():
+    """Injects 1 Root, 3 Children, and 2 Deeper Children if DB is empty."""
+    with get_db_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        if count > 0:
             return
 
-    logger.info("Neo4j is empty — seeding 15 mock nodes & 14 edges …")
-    for nid, label in SEED_NODES:
-        await neo4j_merge_node(driver, nid, label)
-    for edge in SEED_EDGES:
-        # Mark seed edges as already served so they don't pollute the cache
-        await neo4j_merge_edge(
-            driver,
-            edge_id=edge["id"],
-            source_id=edge["source_id"],
-            target_id=edge["target_id"],
-            base_direction=edge["base_direction"],
-            impact_percentage=edge["impact_percentage"],
-            time_horizon=edge["time_horizon"],
-            reasoning=edge["reasoning"],
-        )
-    # Mark all seed edges as served
-    async with driver.session() as session:
-        await session.run("MATCH ()-[r:CAUSES]->() SET r.served = true")
-    logger.info("Seed complete.")
+        logger.info("Database is empty. Seeding Phase 2 Mock Data...")
+        
+        # 1 Root Node
+        r_id = get_or_create_node(conn, "Federal Funds Rate")
+        
+        # 3 Child Nodes
+        c1_id = get_or_create_node(conn, "Mortgage Rates")
+        c2_id = get_or_create_node(conn, "Treasury Yields")
+        c3_id = get_or_create_node(conn, "Consumer Spending")
+        
+        # 2 Deeper Children (attached to Mortgage Rates)
+        d1_id = get_or_create_node(conn, "Housing Demand")
+        d2_id = get_or_create_node(conn, "Construction Activity")
+
+        # Create Edges
+        seed_edges = [
+            (r_id, c1_id, AiRelationship(label="Mortgage Rates", base_direction="DIRECT", impact_percentage=10.0, time_horizon="Short", reasoning="Directly tied to federal rates.")),
+            (r_id, c2_id, AiRelationship(label="Treasury Yields", base_direction="DIRECT", impact_percentage=15.0, time_horizon="Short", reasoning="Yields track benchmark rates closely.")),
+            (r_id, c3_id, AiRelationship(label="Consumer Spending", base_direction="INVERSE", impact_percentage=5.0, time_horizon="Medium", reasoning="Higher rates make borrowing expensive, reducing spend.")),
+            (c1_id, d1_id, AiRelationship(label="Housing Demand", base_direction="INVERSE", impact_percentage=20.0, time_horizon="Medium", reasoning="High mortgage rates crush housing affordability.")),
+            (c1_id, d2_id, AiRelationship(label="Construction Activity", base_direction="INVERSE", impact_percentage=12.0, time_horizon="Long", reasoning="Lower demand halts new developments."))
+        ]
+
+        for src, tgt, rel in seed_edges:
+            insert_edge(conn, src, tgt, rel)
+        
+        conn.commit()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # GEMINI AI BRAIN
 # ──────────────────────────────────────────────────────────────────────────────
-
 @retry(
-    # Exponential back-off: 4 s → 8 s → 10 s … up to 5 attempts
     wait=wait_exponential(multiplier=1, min=4, max=10),
     stop=stop_after_attempt(5),
-    # Only retry on rate-limit / transient errors (not auth / bad-request)
     retry=retry_if_exception_type((Exception,)),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
-def _call_gemini_sync(node_label: str, existing_labels: list[str]) -> list[AiRelationship]:
-    """
-    ─── SYNCHRONOUS Gemini call (run via asyncio executor) ─────────────────────
-    Requests EXACTLY 5 causal relationships from the LLM.
-    Enforces `response_mime_type="application/json"` so the SDK validates
-    the content type header of the response before we parse it.
-
-    The @retry decorator from tenacity handles 429 / transient failures with
-    exponential back-off exactly as specified in PROJECT_SPEC Phase 7.
-    ────────────────────────────────────────────────────────────────────────────
-    """
+def _call_gemini_sync(node_label: str, existing_labels: list[str], n_count: int) -> list[AiRelationship]:
+    """Requests exactly {n_count} relationships from Gemini."""
     existing_str = ", ".join(existing_labels) if existing_labels else "none"
+    
     prompt = f"""
-You are an expert macroeconomist. Identify 5 macroeconomic factors structurally affected by a significant move in {node_label}.
-Do not include {existing_str}.
-Determine if the causal relationship is DIRECT or INVERSE.
-Estimate the 'impact_percentage' (realistic, un-capped numerical percentage).
-Determine the 'time_horizon' (Short = 3 months, Medium = 2 years, Long = 10+ years).
-Provide verbose reasoning.
-Respond in strict JSON matching the required schema — a JSON array of exactly 5 objects:
+You are an expert macroeconomist. Identify exactly {n_count} macroeconomic factors structurally affected by a significant move in {node_label}. 
+Do not include {existing_str}. 
+Determine if the causal relationship is DIRECT or INVERSE. 
+Estimate the 'impact_percentage' (realistic, un-capped numerical percentage). 
+Determine the 'time_horizon' (Short = 3 months, Medium = 2 years, Long = 10+ years). 
+Provide verbose reasoning. 
+Respond in strict JSON matching the required schema: a JSON array of exactly {n_count} objects.
 [
   {{
     "label": "string",
@@ -401,18 +253,16 @@ Respond in strict JSON matching the required schema — a JSON array of exactly 
     "reasoning": "string"
   }}
 ]
-Output ONLY the JSON array, no markdown, no explanation.
+Output ONLY the JSON array.
 """.strip()
 
-    logger.info(f"🤖 Gemini query → '{node_label}' (excluding: {existing_str})")
+    logger.info(f"🤖 Gemini query → '{node_label}' (Requesting {n_count} nodes)")
     response = gemini_model.generate_content(
         prompt,
         generation_config={"response_mime_type": "application/json"},
     )
-    raw: str = response.text.strip()
-    logger.info("🤖 Gemini response received.")
-
-    # Strip accidental markdown fences
+    
+    raw = response.text.strip()
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -420,77 +270,26 @@ Output ONLY the JSON array, no markdown, no explanation.
         raw = raw.strip()
 
     parsed = json.loads(raw)
-    # Validate every item with Pydantic — raises ValidationError on schema mismatch
     return [AiRelationship(**item) for item in parsed]
 
-
-async def get_ai_relationships(
-    node_label: str, existing_labels: list[str]
-) -> list[AiRelationship]:
-    """
-    Async wrapper: runs the blocking Gemini SDK call in a thread-pool executor
-    so it never blocks the FastAPI event loop.
-    """
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, lambda: _call_gemini_sync(node_label, existing_labels)
-    )
+async def get_ai_relationships(node_label: str, existing_labels: list[str], n_count: int) -> list[AiRelationship]:
+    """Runs the blocking Gemini call in a threadpool."""
+    return await asyncio.to_thread(_call_gemini_sync, node_label, existing_labels, n_count)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # APPLICATION LIFECYCLE
 # ──────────────────────────────────────────────────────────────────────────────
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    FastAPI lifespan handler:
-    • On startup  → open the Neo4j async driver, verify connectivity, seed if empty.
-    • On shutdown → gracefully close all Neo4j connections.
-    """
-    global neo4j_driver
-    logger.info("🚀 Starting CAUSAL-FLOW API …")
+    logger.info("🚀 Starting CAUSAL-FLOW Engine (SQLite + NetworkX)...")
+    init_db()
+    seed_db_if_empty()
+    load_graph_to_memory()
+    yield
+    logger.info("🛑 Shutting down.")
 
-    try:
-        neo4j_driver = AsyncGraphDatabase.driver(
-            NEO4J_URI,
-            auth=(NEO4J_USER, NEO4J_PASSWORD),
-        )
-        # Verify the connection works before accepting traffic
-        await neo4j_driver.verify_connectivity()
-        logger.info(f"✅ Connected to Neo4j at {NEO4J_URI}")
-
-        # Create uniqueness constraint on node id (idempotent)
-        async with neo4j_driver.session() as session:
-            await session.run(
-                "CREATE CONSTRAINT causal_node_id IF NOT EXISTS "
-                "FOR (n:EconomicFactor) REQUIRE n.id IS UNIQUE"
-            )
-
-        await seed_neo4j_if_empty(neo4j_driver)
-
-    except Exception as exc:
-        logger.error(f"❌ Neo4j connection failed: {exc}")
-        logger.warning("Running without Neo4j — only /api/health will work correctly.")
-        neo4j_driver = None  # Allow health check to still respond
-
-    yield  # ← application runs here
-
-    if neo4j_driver:
-        await neo4j_driver.close()
-        logger.info("🛑 Neo4j driver closed.")
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# FASTAPI APPLICATION
-# ──────────────────────────────────────────────────────────────────────────────
-
-app = FastAPI(
-    title="CAUSAL-FLOW API",
-    description="Autonomous Macroeconomic Reasoning Engine — Phase 8 Production Backend",
-    version="1.0.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="CAUSAL-FLOW API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -500,287 +299,146 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # ROUTES
 # ──────────────────────────────────────────────────────────────────────────────
-
-@app.get("/api/health", tags=["Utility"])
+@app.get("/api/health")
 async def health_check():
-    """Simple liveness probe used by CI and load-balancer health checks."""
-    neo4j_ok = neo4j_driver is not None
-    return {
-        "status": "ok" if neo4j_ok else "degraded",
-        "neo4j": "connected" if neo4j_ok else "disconnected",
-        "gemini": "configured" if GEMINI_API_KEY else "missing_key",
-    }
+    return {"status": "ok", "graph_nodes": GRAPH.number_of_nodes()}
 
 
-# ─── GET /api/mock-simulation ─────────────────────────────────────────────────
-@app.get("/api/mock-simulation", tags=["Simulation"])
+@app.get("/api/mock-simulation")
 async def get_mock_simulation():
-    """
-    Returns the full seed graph (15 nodes, 14 edges) stored in Neo4j.
-    Satisfies Phase 2: no AI calls, purely static data for frontend integration.
-    The frontend uses this to verify dagre layout before wiring live endpoints.
-    """
-    driver = await get_driver()
-
-    cypher = """
-        MATCH (src:EconomicFactor)-[r:CAUSES]->(tgt:EconomicFactor)
-        RETURN
-            src.id AS src_id, src.label AS src_label,
-            tgt.id AS tgt_id, tgt.label AS tgt_label,
-            r.id AS edge_id,
-            r.base_direction AS base_direction,
-            r.impact_percentage AS impact_percentage,
-            r.time_horizon AS time_horizon,
-            r.reasoning AS reasoning
-    """
-    nodes_seen: dict[str, dict] = {}
-    edges: list[dict] = []
-
-    async with driver.session() as session:
-        result = await session.run(cypher)
-        async for record in result:
-            for nid, nlabel in [
-                (record["src_id"], record["src_label"]),
-                (record["tgt_id"], record["tgt_label"]),
-            ]:
-                if nid not in nodes_seen:
-                    nodes_seen[nid] = {"id": nid, "data": {"label": nlabel}}
-
-            edges.append({
-                "id": record["edge_id"],
-                "source": record["src_id"],
-                "target": record["tgt_id"],
-                "data": {
-                    "base_direction":    record["base_direction"],
-                    "impact_percentage": record["impact_percentage"],
-                    "time_horizon":      record["time_horizon"],
-                    "reasoning":         record["reasoning"],
-                },
-            })
-
-    return {"nodes": list(nodes_seen.values()), "edges": edges}
+    """Returns the full graph currently stored in memory."""
+    nodes = [{"id": n, "data": {"label": d["label"]}} for n, d in GRAPH.nodes(data=True)]
+    edges = [{
+        "id": d["id"], "source": u, "target": v, 
+        "data": {k:v for k,v in d.items() if k not in ["id", "source_id", "target_id"]}
+    } for u, v, d in GRAPH.edges(data=True)]
+    return {"nodes": nodes, "edges": edges}
 
 
-# ─── GET /api/simulation/{node_id} ────────────────────────────────────────────
-@app.get("/api/simulation/{node_id}", tags=["Simulation"])
+@app.get("/api/simulation/{node_id}")
 async def get_simulation(node_id: str):
-    """
-    Returns the subgraph reachable from `node_id` up to 3 hops deep.
-    Matches the JSON contract defined in PROJECT_SPEC Section 3.
-    """
-    driver = await get_driver()
-    nodes, edges = await neo4j_get_subgraph(driver, node_id)
+    """NetworkX BFS to extract a subgraph up to 3 hops."""
+    if node_id not in GRAPH:
+        raise HTTPException(status_code=404, detail="Node not found.")
+    
+    bfs_edges = list(nx.bfs_edges(GRAPH, source=node_id, depth_limit=3))
+    
+    # Collect unique nodes from edges, plus the root
+    sub_nodes = {node_id}
+    for u, v in bfs_edges:
+        sub_nodes.add(u)
+        sub_nodes.add(v)
 
-    if not nodes:
-        raise HTTPException(status_code=404, detail=f"Node '{node_id}' not found in graph.")
+    nodes = [{"id": n, "data": {"label": GRAPH.nodes[n]["label"]}} for n in sub_nodes]
+    edges = []
+    for u, v in bfs_edges:
+        data = GRAPH.edges[u, v]
+        edges.append({
+            "id": data["id"], "source": u, "target": v,
+            "data": {k:v for k,v in data.items() if k not in ["id", "source_id", "target_id"]}
+        })
 
     return {"nodes": nodes, "edges": edges}
 
 
-# ─── POST /api/start ──────────────────────────────────────────────────────────
-@app.post("/api/start", tags=["AI"])
+@app.post("/api/start")
 async def start_simulation(request: StartSimulationRequest):
     """
-    ─── AI-POWERED SIMULATION START ────────────────────────────────────────────
-    1. Resolve or create a root node for the requested label in Neo4j.
-    2. Check Neo4j cache: if unserved outgoing edges already exist for this root,
-       pop ONE and return it immediately (zero AI tokens spent).
-    3. If cache is empty: call Gemini → get 5 relationships → MERGE ALL 5 into
-       Neo4j (batch cache) → mark 4 as served=false (waiting for future clicks)
-       → serve the 1st relationship back to the frontend.
-    4. Return the root + first child as the initial two-node cascade.
-    ────────────────────────────────────────────────────────────────────────────
+    Starts simulation. Resolves root. If cache exists, return cached outgoing edges.
+    Else, asks Gemini for EXACTLY 3 relationships.
     """
-    driver = await get_driver()
     node_label = request.node_label.strip()
 
-    # ── Step 1: Resolve root node ────────────────────────────────────────────
-    existing_id = await neo4j_label_exists(driver, node_label)
-    root_id = existing_id if existing_id else str(uuid.uuid4())
+    with get_db_connection() as conn:
+        root_id = get_or_create_node(conn, node_label)
+        
+        # Check Cache
+        cached_nodes, cached_edges = get_cached_outgoing_edges(root_id)
+        if cached_edges:
+            logger.info(f"✅ Cache HIT for Start: '{node_label}'. Returning cached relationships.")
+            conn.commit()
+            return {
+                "nodes": [{"id": root_id, "data": {"label": node_label}}] + cached_nodes,
+                "edges": cached_edges,
+                "initial_state": request.initial_state,
+                "root_id": root_id
+            }
 
-    await neo4j_merge_node(driver, root_id, node_label)
-    logger.info(f"Root node resolved: '{node_label}' → {root_id}")
-
-    # ── Step 2: Check cache ───────────────────────────────────────────────────
-    cached = await neo4j_pop_cached_edge(driver, root_id)
-
-    if cached:
-        logger.info(f"✅ Cache HIT for '{node_label}' — no AI call needed.")
-        first_relationship = cached
-        first_node_id  = first_relationship["target_id"]
-        first_node_lbl = first_relationship["target_label"]
-    else:
-        # ── Step 3: AI Call (cache miss) ─────────────────────────────────────
-        logger.info(f"🔍 Cache MISS for '{node_label}' — calling Gemini …")
+        # Cache Miss -> Call AI for 3 relationships
+        logger.info(f"🔍 Cache MISS for Start: '{node_label}'. Calling AI...")
         try:
-            ai_relationships = await get_ai_relationships(node_label, [node_label])
-        except Exception as exc:
-            logger.error(f"Gemini call failed after retries: {exc}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"AI service unavailable after retries: {str(exc)}",
-            )
+            ai_rels = await get_ai_relationships(node_label, [node_label], n_count=3)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=str(e))
 
-        # MERGE all 5 into Neo4j (the batch cache)
-        generated_nodes: list[tuple[str, str]] = []
-        for rel in ai_relationships:
-            target_id = str(uuid.uuid4())
-            edge_id   = str(uuid.uuid4())
-            await neo4j_merge_node(driver, target_id, rel.label)
-            await neo4j_merge_edge(
-                driver,
-                edge_id=edge_id,
-                source_id=root_id,
-                target_id=target_id,
-                base_direction=rel.base_direction,
-                impact_percentage=rel.impact_percentage,
-                time_horizon=rel.time_horizon,
-                reasoning=rel.reasoning,
-            )
-            generated_nodes.append((target_id, rel.label))
-
-        logger.info(f"Stored {len(ai_relationships)} relationships in Neo4j cache.")
-
-        # Pop the first one to serve (marks it served=true in DB)
-        first_relationship = await neo4j_pop_cached_edge(driver, root_id)
-        if not first_relationship:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to retrieve newly cached relationship from Neo4j.",
-            )
-        first_node_id  = first_relationship["target_id"]
-        first_node_lbl = first_relationship["target_label"]
-
-    # ── Step 4: Build the response payload ───────────────────────────────────
-    response_nodes = [
-        {"id": root_id,       "data": {"label": node_label}},
-        {"id": first_node_id, "data": {"label": first_node_lbl}},
-    ]
-    response_edges = [
-        {
-            "id":     first_relationship["edge_id"],
-            "source": root_id,
-            "target": first_node_id,
-            "data": {
-                "base_direction":    first_relationship["base_direction"],
-                "impact_percentage": first_relationship["impact_percentage"],
-                "time_horizon":      first_relationship["time_horizon"],
-                "reasoning":         first_relationship["reasoning"],
-            },
-        }
-    ]
+        new_nodes = []
+        new_edges = []
+        
+        for rel in ai_rels:
+            tgt_id = get_or_create_node(conn, rel.label)
+            edge_id = insert_edge(conn, root_id, tgt_id, rel)
+            
+            new_nodes.append({"id": tgt_id, "data": {"label": rel.label}})
+            new_edges.append({
+                "id": edge_id, "source": root_id, "target": tgt_id,
+                "data": {"base_direction": rel.base_direction, "impact_percentage": rel.impact_percentage,
+                         "time_horizon": rel.time_horizon, "reasoning": rel.reasoning}
+            })
+        
+        conn.commit()
 
     return {
-        "nodes":         response_nodes,
-        "edges":         response_edges,
+        "nodes": [{"id": root_id, "data": {"label": node_label}}] + new_nodes,
+        "edges": new_edges,
         "initial_state": request.initial_state,
-        "root_id":       root_id,
+        "root_id": root_id
     }
 
 
-# ─── POST /api/expand/{node_id} ───────────────────────────────────────────────
-@app.post("/api/expand/{node_id}", tags=["AI"])
+@app.post("/api/expand/{node_id}")
 async def expand_node(node_id: str, request: ExpandNodeRequest):
     """
-    ─── AI-POWERED NODE EXPANSION (with batch caching) ─────────────────────────
-    Called when the user clicks "Expand" in the Side Panel.
-
-    Cache-first strategy:
-    1. Look for an unserved (cached) CAUSES edge originating from `node_id`.
-    2. If found → return it immediately (no AI call → no tokens spent).
-    3. If not found → call Gemini for 5 new relationships, MERGE all 5 into Neo4j,
-       then pop & return the first one. The remaining 4 sit in Neo4j as
-       served=false, ready for the next 4 "Expand" clicks on this same node.
-    ────────────────────────────────────────────────────────────────────────────
+    Expands a node. If cache exists, returns cached outgoing edges.
+    Else, asks Gemini for EXACTLY 2 relationships.
     """
-    driver = await get_driver()
+    if node_id not in GRAPH:
+        raise HTTPException(status_code=404, detail="Node ID not found in RAM graph.")
 
-    # Ensure the source node exists (it was put there by /start or a prior /expand)
-    await neo4j_merge_node(driver, node_id, request.label)
+    # Check Cache
+    cached_nodes, cached_edges = get_cached_outgoing_edges(node_id)
+    if cached_edges:
+        logger.info(f"✅ Cache HIT for Expand: '{request.label}'. Returning cached relationships.")
+        return {"nodes": cached_nodes, "edges": cached_edges}
 
-    # ── Step 1: Cache check ───────────────────────────────────────────────────
-    cached = await neo4j_pop_cached_edge(driver, node_id)
+    # Cache Miss -> Call AI for 2 relationships
+    logger.info(f"🔍 Cache MISS for Expand: '{request.label}'. Calling AI...")
+    try:
+        ai_rels = await get_ai_relationships(request.label, request.existing_labels, n_count=2)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
-    if cached:
-        logger.info(f"✅ Cache HIT for expand on '{request.label}' ({node_id})")
-        first_relationship = cached
-    else:
-        # ── Step 2: AI call (cache miss) ─────────────────────────────────────
-        logger.info(f"🔍 Cache MISS for expand on '{request.label}' — calling Gemini …")
-        try:
-            ai_relationships = await get_ai_relationships(
-                request.label, request.existing_labels
-            )
-        except Exception as exc:
-            logger.error(f"Gemini call failed after retries: {exc}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"AI service unavailable after retries: {str(exc)}",
-            )
+    new_nodes = []
+    new_edges = []
 
-        # MERGE all 5 into Neo4j (batch cache write)
-        for rel in ai_relationships:
-            target_id = str(uuid.uuid4())
-            edge_id   = str(uuid.uuid4())
-            await neo4j_merge_node(driver, target_id, rel.label)
-            await neo4j_merge_edge(
-                driver,
-                edge_id=edge_id,
-                source_id=node_id,
-                target_id=target_id,
-                base_direction=rel.base_direction,
-                impact_percentage=rel.impact_percentage,
-                time_horizon=rel.time_horizon,
-                reasoning=rel.reasoning,
-            )
+    with get_db_connection() as conn:
+        for rel in ai_rels:
+            tgt_id = get_or_create_node(conn, rel.label)
+            edge_id = insert_edge(conn, node_id, tgt_id, rel)
+            
+            new_nodes.append({"id": tgt_id, "data": {"label": rel.label}})
+            new_edges.append({
+                "id": edge_id, "source": node_id, "target": tgt_id,
+                "data": {"base_direction": rel.base_direction, "impact_percentage": rel.impact_percentage,
+                         "time_horizon": rel.time_horizon, "reasoning": rel.reasoning}
+            })
+        conn.commit()
 
-        logger.info(f"Stored {len(ai_relationships)} expansion relationships in Neo4j.")
-
-        # Pop first as the immediate response
-        first_relationship = await neo4j_pop_cached_edge(driver, node_id)
-        if not first_relationship:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to retrieve newly cached relationship from Neo4j.",
-            )
-
-    # ── Step 3: Build minimal response (1 node, 1 edge) ──────────────────────
-    return {
-        "nodes": [
-            {
-                "id":   first_relationship["target_id"],
-                "data": {"label": first_relationship["target_label"]},
-            }
-        ],
-        "edges": [
-            {
-                "id":     first_relationship["edge_id"],
-                "source": node_id,
-                "target": first_relationship["target_id"],
-                "data": {
-                    "base_direction":    first_relationship["base_direction"],
-                    "impact_percentage": first_relationship["impact_percentage"],
-                    "time_horizon":      first_relationship["time_horizon"],
-                    "reasoning":         first_relationship["reasoning"],
-                },
-            }
-        ],
-    }
+    return {"nodes": new_nodes, "edges": new_edges}
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT (local development)
-# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,        # Hot-reload on file changes during development
-        log_level="info",
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")
