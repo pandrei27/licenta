@@ -147,8 +147,3 @@ Respond in strict JSON matching the required schema.
 * **Integrate AI into Start & Expand:** * Update `POST /api/start`: Take the user's raw text input, send it to Gemini using the prompt in Section 6, parse the 5 generated relationships, cache them in SQLite, and return 1 to the frontend as the starting cascade.
   * Update `POST /api/expand`: Do the exact same thing, but use the clicked node's label as the prompt input. 
 * Wire the active "Expand" button on the frontend Side Panel to hit the expand endpoint, append the result to `nodes`/`edges` state, and re-run the `dagre` layout.
-
-### Phase 8: Production Migration (Neo4j)
-* Install the Python `neo4j` bolt driver.
-* Replace SQLite read/write operations with Cypher `MERGE` and `MATCH` queries.
-* Ensure graph traversal (`MATCH path = (n)-[*1..3]->(m)`) formats the data to perfectly match the JSON contract in Section 3.
