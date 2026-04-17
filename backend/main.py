@@ -51,7 +51,7 @@ GRAPH = nx.DiGraph()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PYDANTIC MODELS
+# PYDANTIC MODELS (Now with Auto-Uppercase Normalization)
 # ──────────────────────────────────────────────────────────────────────────────
 class AiRelationship(BaseModel):
     """Represents one causal relationship returned by the Gemini AI."""
@@ -59,8 +59,13 @@ class AiRelationship(BaseModel):
     base_direction: str = Field(..., description="DIRECT or INVERSE")
     impact_percentage: float = Field(..., description="Estimated real-world percentual impact")
     time_horizon: str = Field(..., description="Short | Medium | Long")
-    # FIX: Updated to expect a list of strings instead of a single string
     reasoning: list[str] = Field(..., description="Verbose economic theory explanation as an array of strings")
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, v: str) -> str:
+        # Converts " gOld " to "GOLD" automatically
+        return " ".join(v.strip().split()).upper()
 
     @field_validator("base_direction")
     @classmethod
@@ -80,9 +85,24 @@ class StartSimulationRequest(BaseModel):
     node_label: str = Field(..., min_length=1)
     initial_state: str = Field(default="INCREASING")
 
+    @field_validator("node_label")
+    @classmethod
+    def normalize_label(cls, v: str) -> str:
+        return " ".join(v.strip().split()).upper()
+
 class ExpandNodeRequest(BaseModel):
     label: str = Field(..., min_length=1)
     existing_labels: list[str] = Field(default_factory=list)
+
+    @field_validator("label")
+    @classmethod
+    def normalize_label(cls, v: str) -> str:
+        return " ".join(v.strip().split()).upper()
+
+    @field_validator("existing_labels")
+    @classmethod
+    def normalize_existing(cls, v: list[str]) -> list[str]:
+        return [" ".join(l.strip().split()).upper() for l in v]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -126,17 +146,20 @@ def load_graph_to_memory():
     logger.info(f"Loaded graph into RAM: {GRAPH.number_of_nodes()} nodes, {GRAPH.number_of_edges()} edges.")
 
 def get_or_create_node(conn: sqlite3.Connection, label: str) -> str:
-    cur = conn.execute("SELECT id FROM nodes WHERE label = ?", (label,))
+    # Double check normalization just in case
+    norm_label = " ".join(label.strip().split()).upper()
+    
+    # FIX: Use UPPER() in SQLite query to perfectly match existing messy data
+    cur = conn.execute("SELECT id FROM nodes WHERE UPPER(label) = ?", (norm_label,))
     row = cur.fetchone()
     if row:
         return row["id"]
     
     new_id = str(uuid.uuid4())
-    conn.execute("INSERT INTO nodes (id, label) VALUES (?, ?)", (new_id, label))
-    GRAPH.add_node(new_id, label=label)
+    conn.execute("INSERT INTO nodes (id, label) VALUES (?, ?)", (new_id, norm_label))
+    GRAPH.add_node(new_id, label=norm_label)
     return new_id
 
-# Helper to safely parse reasoning from SQLite strings back into Python lists
 def parse_reasoning(raw_reasoning: str) -> Any:
     try:
         parsed = json.loads(raw_reasoning)
@@ -146,8 +169,6 @@ def parse_reasoning(raw_reasoning: str) -> Any:
 
 def insert_edge(conn: sqlite3.Connection, source_id: str, target_id: str, rel: AiRelationship) -> str:
     edge_id = str(uuid.uuid4())
-    
-    # FIX: SQLite cannot save Python Lists. We must serialize it to a JSON string.
     reasoning_str = json.dumps(rel.reasoning)
     
     conn.execute("""
@@ -182,7 +203,6 @@ def get_cached_outgoing_edges(source_id: str) -> Tuple[List[dict], List[dict]]:
                 "base_direction": data["base_direction"],
                 "impact_percentage": data["impact_percentage"],
                 "time_horizon": data["time_horizon"],
-                # FIX: Parse the string back into a list for the frontend
                 "reasoning": parse_reasoning(data["reasoning"])
             }
         })
@@ -206,7 +226,6 @@ def seed_db_if_empty():
         d1_id = get_or_create_node(conn, "Housing Demand")
         d2_id = get_or_create_node(conn, "Construction Activity")
 
-        # FIX: Converted all mock reasoning strings into lists to match the new Pydantic schema
         seed_edges = [
             (r_id, c1_id, AiRelationship(label="Mortgage Rates", base_direction="DIRECT", impact_percentage=10.0, time_horizon="Short", reasoning=["Trigger: The Federal Reserve adjusts the benchmark overnight lending rate.", "Flow: Commercial banks immediately adjust their prime lending rates to maintain margins.", "Effect: Mortgage rates rise or fall in direct correlation with the federal funds rate."])),
             (r_id, c2_id, AiRelationship(label="Treasury Yields", base_direction="DIRECT", impact_percentage=15.0, time_horizon="Short", reasoning=["Trigger: The Federal Reserve signals a change in monetary policy.", "Flow: Institutional investors reprice the risk-free rate of return.", "Effect: Treasury yields adjust directly to reflect the new benchmark rate."])),
@@ -235,20 +254,24 @@ def _call_gemini_sync(node_label: str, existing_labels: list[str], n_count: int)
     existing_str = ", ".join(existing_labels) if existing_labels else "none"
     
     prompt = f"""
-You are an expert financial educator who explains market dynamics in plain, everyday English.
-Identify exactly {n_count} specific financial assets, commodities, or market indices (like Gold, US Dollar, Oil, or S&P 500) that are strongly affected when {node_label} makes a big move. 
+You are an expert financial educator explaining market correlations in plain, everyday English.
+Identify exactly {n_count} specific financial assets, sectors, or equities that have the HIGHEST sensitivity and most direct exposure to {node_label}. 
 
-Focus on practical, real-world assets that people actually trade. Do not include any of these already existing factors: {existing_str}. 
+Focus on what is actually impacted the most in the real world. (For example, if the input is Copper, focus on highly correlated assets like Copper Miners or Industrials, rather than loosely correlated macro currencies). 
+
+CRITICAL DEDUPLICATION RULE: Do not include any of these already existing factors (or semantic variations of them): {existing_str}. 
+
+Assume {node_label} is experiencing a standard, realistic cyclical trend (e.g., a typical 6-to-12 month bull or bear market).
 
 For each identified asset:
 1. Determine if the relationship is DIRECT (they move together) or INVERSE (they move in opposite directions). 
-2. Estimate the 'impact_percentage' (a realistic guess of the percentage impact). 
+2. Estimate the 'impact_percentage'. This should be a realistic estimate of how much the target asset's price would change over the course of this standard trend, based on its historical sensitivity (Beta). Use realistic structural numbers (e.g., 8.5, 15.0, 25.0). Do not artificially exaggerate, but avoid tiny daily noise/fractions (like 0.05).
 3. Determine the 'time_horizon': Short (3 months), Medium (2 years), or Long (10+ years). 
-4. Provide the reasoning as a simple, easy-to-understand 3-step story. ABSOLUTELY NO HEAVY FINANCIAL JARGON. Explain it so a beginner could easily grasp it.
+4. Provide the reasoning as a simple, easy-to-understand 3-step story. ABSOLUTELY NO HEAVY FINANCIAL JARGON. Explain the real-world business or economic reaction so a beginner could easily grasp it.
     
 Format the reasoning exactly like this:
-- Trigger: [Simple explanation of the initial event]
-- Flow: [Simple story of what investors or consumers do next and why]
+- Trigger: [Simple explanation of the trend]
+- Flow: [Simple story of the business, consumer, or market reaction]
 - Effect: [The final result on the target asset]
 
 Respond in strict JSON matching the required schema: a JSON array of exactly {n_count} objects.
@@ -350,7 +373,8 @@ async def get_simulation(node_id: str):
 
 @app.post("/api/start")
 async def start_simulation(request: StartSimulationRequest):
-    node_label = request.node_label.strip()
+    # Pydantic has already upper-cased request.node_label
+    node_label = request.node_label
 
     with get_db_connection() as conn:
         root_id = get_or_create_node(conn, node_label)
