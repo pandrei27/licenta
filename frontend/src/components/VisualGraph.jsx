@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import ReactFlow, { Background, Controls, MiniMap } from 'reactflow';
+import ReactFlow, { Background, Controls, MiniMap, MarkerType } from 'reactflow'; // <-- Added MarkerType
 import 'reactflow/dist/style.css';
 import axios from 'axios';
 import { getLayoutedElements } from '../utils/layoutUtils';
@@ -75,12 +75,21 @@ const VisualGraph = () => {
 
     const styledEdges = rawEdges.map(edge => {
       const targetState = nodeStates[edge.target] || 'INCREASING';
+      const strokeColor = targetState === 'INCREASING' ? '#22c55e' : '#ef4444';
+      
       return {
         ...edge,
         animated: true,
         style: {
-          stroke: targetState === 'INCREASING' ? '#22c55e' : '#ef4444',
+          stroke: strokeColor,
           strokeWidth: calculateEdgeWidth(edge.data?.impact_percentage || 1),
+        },
+        // NEW: Add the arrow to the end of the line
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 7,
+          height: 7,
+          color: strokeColor,
         },
       };
     });
@@ -90,14 +99,23 @@ const VisualGraph = () => {
 
   const onNodeClick = useCallback((_, node) => {
     const label = node.data?.label || "Unknown";
-    console.log("Clicked Node:", node);
     const incomingEdge = edges.find((e) => e.target === node.id);
+    
+    // Find the parent node to get its name and color state
+    let sourceNode = null;
+    if (incomingEdge) {
+      sourceNode = nodes.find(n => n.id === incomingEdge.source);
+    }
+
     setSelectedNode({
       id: node.id,
       label: label,
+      state: node.data?.state || 'INCREASING',
       edgeData: incomingEdge ? incomingEdge.data : null,
+      sourceLabel: sourceNode ? (sourceNode.data?.label || sourceNode.label) : null,
+      sourceState: sourceNode ? sourceNode.data?.state : null,
     });
-  }, [edges]);
+  }, [edges, nodes]);
 
   const handleExpand = async () => {
     if (!selectedNode || !simRootId) return;

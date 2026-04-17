@@ -5,7 +5,13 @@ const nodeHeight = 36;
 
 export const getLayoutedElements = (nodes, edges, direction = 'TB') => {
   const dagreGraph = new dagre.graphlib.Graph();
-  dagreGraph.setGraph({ rankdir: direction });
+  
+  // NEW: Added ranksep (vertical spacing) and nodesep (horizontal spacing)
+  dagreGraph.setGraph({ 
+    rankdir: direction,
+    ranksep: 120, // <-- Increases vertical space (length of the arrows)
+    nodesep: 80   // <-- Increases horizontal space between side-by-side nodes
+  });
 
   dagreGraph.setDefaultEdgeLabel(() => ({}));
 
