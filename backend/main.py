@@ -183,19 +183,26 @@ def insert_edge(conn: sqlite3.Connection, source_id: str, target_id: str, rel: A
     )
     return edge_id
 
-def get_cached_outgoing_edges(source_id: str) -> Tuple[List[dict], List[dict]]:
+def get_cached_subgraph(source_id: str, depth_limit: int = 4) -> Tuple[List[dict], List[dict]]:
+    """Traverses the RAM graph to pull the full downstream tree up to the depth limit."""
     if source_id not in GRAPH:
         return [], []
     
-    out_edges = list(GRAPH.out_edges(source_id, data=True))
-    if not out_edges:
+    # Use NetworkX Breadth-First Search to grab ALL downstream edges
+    bfs_edges = list(nx.bfs_edges(GRAPH, source=source_id, depth_limit=depth_limit))
+    
+    if not bfs_edges:
         return [], []
 
-    nodes = []
-    edges = []
-    for u, v, data in out_edges:
-        nodes.append({"id": v, "data": {"label": GRAPH.nodes[v]["label"]}})
-        edges.append({
+    nodes_set = set()
+    edges_list = []
+    
+    for u, v in bfs_edges:
+        # We only add the target 'v' to the nodes set. 
+        # The root node 'u' is handled by the API endpoints automatically.
+        nodes_set.add(v) 
+        data = GRAPH.edges[u, v]
+        edges_list.append({
             "id": data["id"],
             "source": u,
             "target": v,
@@ -206,7 +213,9 @@ def get_cached_outgoing_edges(source_id: str) -> Tuple[List[dict], List[dict]]:
                 "reasoning": parse_reasoning(data["reasoning"])
             }
         })
-    return nodes, edges
+
+    nodes_list = [{"id": n, "data": {"label": GRAPH.nodes[n]["label"]}} for n in nodes_set]
+    return nodes_list, edges_list
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SEED DATA (Phase 2 Mock)
@@ -379,7 +388,7 @@ async def start_simulation(request: StartSimulationRequest):
     with get_db_connection() as conn:
         root_id = get_or_create_node(conn, node_label)
         
-        cached_nodes, cached_edges = get_cached_outgoing_edges(root_id)
+        cached_nodes, cached_edges = get_cached_subgraph(root_id, depth_limit=4)
         if cached_edges:
             logger.info(f"✅ Cache HIT for Start: '{node_label}'")
             conn.commit()
@@ -424,7 +433,7 @@ async def expand_node(node_id: str, request: ExpandNodeRequest):
     if node_id not in GRAPH:
         raise HTTPException(status_code=404, detail="Node ID not found in RAM graph.")
 
-    cached_nodes, cached_edges = get_cached_outgoing_edges(node_id)
+    cached_nodes, cached_edges = get_cached_subgraph(node_id, depth_limit=4)
     if cached_edges:
         logger.info(f"✅ Cache HIT for Expand: '{request.label}'")
         return {"nodes": cached_nodes, "edges": cached_edges}
