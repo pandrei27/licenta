@@ -23,6 +23,3 @@ Causal-Flow is a specialized tool for visualizing macroeconomic causal relations
 5. Local Database Integration (NetworkX/SQLite)
 6. Simulation Initialization UI
 7. Resilient AI Brain (Gemini)
-
----
-*Built as a directed autonomous project. See `PROJECT_SPEC.md` for full implementation details.*
