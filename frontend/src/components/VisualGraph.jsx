@@ -1,14 +1,14 @@
 import { useEffect, useState, useCallback } from 'react';
-import ReactFlow, { Background, Controls, MiniMap, MarkerType } from 'reactflow'; // <-- Added MarkerType
+import ReactFlow, { Background, Controls, MiniMap, MarkerType } from 'reactflow';
 import 'reactflow/dist/style.css';
 import axios from 'axios';
 import { getLayoutedElements } from '../utils/layoutUtils';
 import SidePanel from './common/SidePanel';
 
-// Utility for edge thickness
+// REVERTED to original Log10 mathematical calculation
 const calculateEdgeWidth = (impactPercentage) => {
   if (impactPercentage <= 0) return 1;
-  return Math.max(1, Math.min(8, Math.log10(impactPercentage + 1) * 3));
+  return Math.max(1, Math.min(25, Math.log10(impactPercentage + 1) * 5));
 };
 
 const VisualGraph = () => {
@@ -16,14 +16,16 @@ const VisualGraph = () => {
   const [edges, setEdges] = useState([]);
   const [selectedNode, setSelectedNode] = useState(null);
   
-  // Track the root of the simulation to recalculate states on expand
   const [simRootId, setSimRootId] = useState(null);
   const [simRootState, setSimRootState] = useState("INCREASING");
 
-  // Reusable BFS Engine to calculate states and styles
   const applyStateAndStyles = useCallback((rawNodes, rawEdges, rootId, initialState) => {
     const nodeStates = {};
+    const nodeOrder = {}; 
+    let orderCounter = 0;
+    
     nodeStates[rootId] = initialState;
+    nodeOrder[rootId] = orderCounter++;
     
     const queue = [rootId];
     const visitedEdges = new Set();
@@ -46,6 +48,7 @@ const VisualGraph = () => {
         
         if (!visitedNodes.has(edge.target)) {
           visitedNodes.add(edge.target);
+          nodeOrder[edge.target] = orderCounter++; 
           queue.push(edge.target);
         }
       }
@@ -55,20 +58,22 @@ const VisualGraph = () => {
       const state = nodeStates[node.id] || 'INCREASING'; 
       const label = node.data?.label || node.label || "Unknown Node";
       
+      const delay = (nodeOrder[node.id] || 0) * 150; 
+      
       return {
         ...node,
         data: { ...node.data, label, state },
-        // Keep tailwind for shadows/rounding, but force colors via style
-        className: 'rounded-lg shadow-md !p-3 text-sm font-bold text-gray-800 text-center',
+        className: 'rounded-lg shadow-md !p-3 text-sm font-bold text-gray-800 text-center animate-pop-in',
         style: { 
           width: 150, 
           display: 'flex', 
           justifyContent: 'center', 
           alignItems: 'center',
-          backgroundColor: state === 'INCREASING' ? '#f0fdf4' : '#fef2f2', // bg-green-50 / bg-red-50
-          borderColor: state === 'INCREASING' ? '#22c55e' : '#ef4444',     // border-green-500 / border-red-500
+          backgroundColor: state === 'INCREASING' ? '#f0fdf4' : '#fef2f2',
+          borderColor: state === 'INCREASING' ? '#22c55e' : '#ef4444',
           borderWidth: '2px',
-          borderStyle: 'solid'
+          borderStyle: 'solid',
+          animationDelay: `${delay}ms`
         }
       };
     });
@@ -77,18 +82,25 @@ const VisualGraph = () => {
       const targetState = nodeStates[edge.target] || 'INCREASING';
       const strokeColor = targetState === 'INCREASING' ? '#22c55e' : '#ef4444';
       
+      const targetNodeDelay = (nodeOrder[edge.target] || 0) * 150; 
+      // The arrow will wait for the exact moment the target node appears, plus a 200ms grace period
+      const edgeDelay = targetNodeDelay + 200; 
+      
       return {
         ...edge,
-        animated: true,
+        animated: false, 
+        type: 'smoothstep',
+        // Notice we removed the className here and moved the logic directly into the SVG style
         style: {
           stroke: strokeColor,
           strokeWidth: calculateEdgeWidth(edge.data?.impact_percentage || 1),
+          // Forcing the animation inline guarantees React Flow applies it to the SVG <path>
+          animation: `popIn 0.8s ease-out ${edgeDelay}ms both` 
         },
-        // NEW: Add the arrow to the end of the line
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          width: 7,
-          height: 7,
+          width: 7,  // REVERTED to original size
+          height: 7, // REVERTED to original size
           color: strokeColor,
         },
       };
@@ -101,7 +113,6 @@ const VisualGraph = () => {
     const label = node.data?.label || "Unknown";
     const incomingEdge = edges.find((e) => e.target === node.id);
     
-    // Find the parent node to get its name and color state
     let sourceNode = null;
     if (incomingEdge) {
       sourceNode = nodes.find(n => n.id === incomingEdge.source);
@@ -126,16 +137,13 @@ const VisualGraph = () => {
         existing_labels: nodes.map(n => n.data?.label)
       });
 
-      // Format new elements
       const newNodes = response.data.nodes.map(n => ({...n, data: { ...n.data, label: n.data?.label || n.label}}));
       const newEdges = response.data.edges.map(e => ({...e, data: e.data || {}}));
 
       const combinedNodes = [...nodes, ...newNodes];
       const combinedEdges = [...edges, ...newEdges];
 
-      // Re-run the BFS engine over the entire combined graph to cascade colors!
       const { styledNodes, styledEdges } = applyStateAndStyles(combinedNodes, combinedEdges, simRootId, simRootState);
-      
       const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(styledNodes, styledEdges);
 
       setNodes(layoutedNodes);
@@ -158,14 +166,10 @@ const VisualGraph = () => {
       
       const rootNodeId = rawNodes[0].id;
       
-      // Save root context for future expansions
       setSimRootId(rootNodeId);
       setSimRootState(initial_state);
 
-      // Apply BFS and Styling
       const { styledNodes, styledEdges } = applyStateAndStyles(rawNodes, rawEdges, rootNodeId, initial_state);
-
-      // Apply Dagre Layout
       const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(styledNodes, styledEdges);
       
       setNodes(layoutedNodes);

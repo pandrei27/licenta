@@ -6,20 +6,27 @@ const nodeHeight = 36;
 export const getLayoutedElements = (nodes, edges, direction = 'TB') => {
   const dagreGraph = new dagre.graphlib.Graph();
   
-  // NEW: Added ranksep (vertical spacing) and nodesep (horizontal spacing)
   dagreGraph.setGraph({ 
     rankdir: direction,
-    ranksep: 120, // <-- Increases vertical space (length of the arrows)
-    nodesep: 80   // <-- Increases horizontal space between side-by-side nodes
+    ranksep: 120, 
+    nodesep: 80   
   });
 
   dagreGraph.setDefaultEdgeLabel(() => ({}));
+
+  // Sort edges descending by impact to ensure left-to-right sorting of children
+  const sortedEdges = [...edges].sort((a, b) => {
+    const impactA = a.data?.impact_percentage || 0;
+    const impactB = b.data?.impact_percentage || 0;
+    return impactB - impactA;
+  });
 
   nodes.forEach((node) => {
     dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
   });
 
-  edges.forEach((edge) => {
+  // Feed the sorted edges into Dagre so it prioritizes them from left to right
+  sortedEdges.forEach((edge) => {
     dagreGraph.setEdge(edge.source, edge.target);
   });
 
@@ -36,5 +43,5 @@ export const getLayoutedElements = (nodes, edges, direction = 'TB') => {
     };
   });
 
-  return { nodes: layoutedNodes, edges };
+  return { nodes: layoutedNodes, edges: sortedEdges };
 };
