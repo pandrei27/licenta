@@ -18,7 +18,7 @@ const VisualGraph = () => {
   const [simRootId, setSimRootId] = useState(null);
   const [simRootState, setSimRootState] = useState("INCREASING");
   
-  const [isHighlighting, setIsHighlighting] = useState(false);
+  const [highlightMode, setHighlightMode] = useState(null); 
 
   const applyStateAndStyles = useCallback((rawNodes, rawEdges, rootId, initialState) => {
     const nodeStates = {};
@@ -126,13 +126,12 @@ const VisualGraph = () => {
     });
   }, [edges, nodes]);
 
-  // Highlight DFS Logic & Animation
-  const toggleLongestChain = () => {
+  const toggleHighlight = (mode) => {
     if (!simRootId || nodes.length === 0) return;
 
-    if (isHighlighting) {
-      // 1. REVERT: Strip custom styles, return to state colors, restore arrowheads
-      setIsHighlighting(false);
+    // 1. REVERT STATE
+    if (highlightMode === mode) {
+      setHighlightMode(null);
       
       setNodes(nds => nds.map(n => ({
         ...n,
@@ -152,59 +151,75 @@ const VisualGraph = () => {
           ...e,
           animated: false,
           style: {
-            ...e.style,
-            stroke: strokeColor,
-            opacity: 1,
-            animation: 'none',
-            filter: 'none'
+            ...e.style, stroke: strokeColor, opacity: 1, animation: 'none', filter: 'none'
           },
+          // Restore the arrowheads!
           markerEnd: {
-            type: MarkerType.ArrowClosed,
-            width: 7, height: 7,
-            color: strokeColor // Restore arrowhead color
+            type: MarkerType.ArrowClosed, width: 7, height: 7, color: strokeColor 
           }
         };
       }));
       return;
     }
 
-    // 2. ACTIVATE: DFS to find longest array of consecutive nodes
-    let maxPath = [];
+    // 2. PATH FINDING ALGORITHMS
+    let bestPath = [];
     
-    const dfs = (currId, currentPath) => {
-      const outEdges = edges.filter(e => e.source === currId);
-      
-      if (outEdges.length === 0) {
-        if (currentPath.length > maxPath.length) {
-          maxPath = [...currentPath];
+    if (mode === 'LONGEST') {
+      const dfs = (currId, currentPath) => {
+        const outEdges = edges.filter(e => e.source === currId);
+        if (outEdges.length === 0) {
+          if (currentPath.length > bestPath.length) bestPath = [...currentPath];
+          return;
         }
-        return;
-      }
-      
-      for (const e of outEdges) {
-        if (!currentPath.includes(e.target)) {
-          dfs(e.target, [...currentPath, e.target]);
+        for (const e of outEdges) {
+          if (!currentPath.includes(e.target)) dfs(e.target, [...currentPath, e.target]);
         }
-      }
-    };
-    
-    dfs(simRootId, [simRootId]);
+      };
+      dfs(simRootId, [simRootId]);
+    } 
+    else if (mode === 'IMPACT') {
+      let maxScore = -1;
+      const decayFactor = 0.2; 
 
-    // 3. APPLY STYLES: Highlight path and dim the rest explicitly
-    setIsHighlighting(true);
+      const dfs = (currId, currentPath, currentScore, depth) => {
+        const outEdges = edges.filter(e => e.source === currId);
+        
+        if (outEdges.length === 0) {
+          if (currentScore > maxScore) {
+            maxScore = currentScore;
+            bestPath = [...currentPath];
+          }
+          return;
+        }
+        
+        for (const e of outEdges) {
+          if (!currentPath.includes(e.target)) {
+            const impact = e.data?.impact_percentage || 0;
+            const edgeScore = impact * Math.pow(decayFactor, depth);
+            dfs(e.target, [...currentPath, e.target], currentScore + edgeScore, depth + 1);
+          }
+        }
+      };
+      dfs(simRootId, [simRootId], 0, 0);
+    }
+
+    // 3. APPLY STYLES
+    setHighlightMode(mode);
+    const themeColor = mode === 'LONGEST' ? '#9333ea' : '#ea580c'; 
+    const shadowColor = mode === 'LONGEST' ? 'rgba(147, 51, 234, 0.4)' : 'rgba(234, 88, 12, 0.4)';
+    const glowColor = mode === 'LONGEST' ? 'rgba(147, 51, 234, 0.8)' : 'rgba(234, 88, 12, 0.8)';
     
     setNodes(nds => nds.map(n => {
-      const pathIndex = maxPath.indexOf(n.id);
-      
+      const pathIndex = bestPath.indexOf(n.id);
       if (pathIndex !== -1) {
         return {
           ...n,
           style: {
             ...n.style,
-            borderColor: '#9333ea', 
-            boxShadow: '0 4px 20px 4px rgba(147, 51, 234, 0.4)',
+            borderColor: themeColor, 
+            boxShadow: `0 4px 20px 4px ${shadowColor}`,
             opacity: 1,
-            // Sequential depth-based jump delay
             animation: `nodeJump 0.5s ease-out ${pathIndex * 0.15}s forwards`
           }
         };
@@ -212,55 +227,42 @@ const VisualGraph = () => {
         return {
           ...n,
           style: { 
-            ...n.style, 
-            opacity: 0.15, 
-            borderColor: '#cbd5e1', // Explicitly dim border
-            boxShadow: 'none', 
-            animation: 'none' 
+            ...n.style, opacity: 0.15, borderColor: '#cbd5e1', boxShadow: 'none', animation: 'none' 
           }
         };
       }
     }));
 
     setEdges(eds => eds.map(e => {
-      const srcIdx = maxPath.indexOf(e.source);
-      const tgtIdx = maxPath.indexOf(e.target);
+      const srcIdx = bestPath.indexOf(e.source);
+      const tgtIdx = bestPath.indexOf(e.target);
       const inPath = srcIdx !== -1 && tgtIdx !== -1 && tgtIdx === srcIdx + 1;
 
       if (inPath) {
         return {
           ...e,
-          animated: false, // Turn off dotted lines
+          animated: false,
           style: {
             ...e.style,
-            stroke: '#9333ea',
-            strokeWidth: (e.style?.strokeWidth || 2) + 1, // Make slightly thicker
-            filter: 'drop-shadow(0px 0px 4px rgba(147, 51, 234, 0.8))',
-            opacity: 0, // Starts invisible, animation handles the rest
-            // DFS depth-based drawing animation stagger
-            animation: `pathEdgeReveal 0.4s ease-out ${(srcIdx * 0.15) + 0.1}s forwards`
+            stroke: themeColor,
+            strokeWidth: (e.style?.strokeWidth || 2) + 1,
+            filter: `drop-shadow(0px 0px 4px ${glowColor})`,
+            opacity: 0,
+            // Increased duration to 0.8s to account for the larger 3000px dash array
+            animation: `pathEdgeReveal 0.8s ease-out ${(srcIdx * 0.15) + 0.1}s forwards`
           },
-          markerEnd: {
-            type: MarkerType.ArrowClosed,
-            width: 7, height: 7,
-            color: '#9333ea',
-          }
+          // REMOVE markerEnd for the active path to fix the floating SVG artifact
+          markerEnd: undefined
         };
       } else {
         return {
           ...e,
           animated: false,
           style: { 
-            ...e.style, 
-            stroke: '#cbd5e1', // Explicitly dim the line color
-            opacity: 0.2, 
-            animation: 'none',
-            filter: 'none'
+            ...e.style, stroke: '#cbd5e1', opacity: 0.2, animation: 'none', filter: 'none'
           },
           markerEnd: {
-            type: MarkerType.ArrowClosed,
-            width: 7, height: 7,
-            color: '#cbd5e1', // Explicitly dim the arrowhead!
+            type: MarkerType.ArrowClosed, width: 7, height: 7, color: '#cbd5e1',
           }
         };
       }
@@ -269,7 +271,7 @@ const VisualGraph = () => {
 
   const handleExpand = async () => {
     if (!selectedNode || !simRootId) return;
-    setIsHighlighting(false); 
+    setHighlightMode(null); 
 
     try {
       const response = await axios.post(`http://localhost:8000/api/expand/${selectedNode.id}`, {
@@ -296,7 +298,7 @@ const VisualGraph = () => {
   };
 
   const startSimulation = useCallback(async (node_label, initial_state, target_labels, n_count) => {
-    setIsHighlighting(false); 
+    setHighlightMode(null); 
     try {
       const response = await axios.post('http://localhost:8000/api/start', {
         node_label,
@@ -343,11 +345,11 @@ const VisualGraph = () => {
             0%, 100% { translate: 0 0; }
             50% { translate: 0 -12px; }
           }
-          /* This makes the line draw itself dynamically */
+          /* Increased limits to 3000 to cover extremely wide layout branches */
           @keyframes pathEdgeReveal {
-            0% { stroke-dasharray: 1000; stroke-dashoffset: 1000; opacity: 0; }
-            1% { opacity: 1; }
-            100% { stroke-dasharray: 1000; stroke-dashoffset: 0; opacity: 1; }
+            0% { stroke-dasharray: 3000; stroke-dashoffset: 3000; opacity: 0; }
+            1% { opacity: 1; stroke-dasharray: 3000; stroke-dashoffset: 3000; }
+            100% { stroke-dasharray: 3000; stroke-dashoffset: 0; opacity: 1; }
           }
         `}
       </style>
@@ -362,18 +364,32 @@ const VisualGraph = () => {
         <Controls />
         <MiniMap nodeColor={(n) => n.className?.includes('bg-green-50') ? '#22c55e' : '#ef4444'} />
         
-        <Panel position="top-right" className="bg-white/90 p-2 rounded-xl shadow-lg backdrop-blur-md border border-gray-200 mt-2 mr-2">
+        <Panel position="top-right" className="bg-white/90 p-2 rounded-xl shadow-lg backdrop-blur-md border border-gray-200 mt-2 mr-2 flex space-x-2">
+           
            <button 
-             onClick={toggleLongestChain}
-             className={`flex items-center space-x-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-300 ${
-               isHighlighting 
+             onClick={() => toggleHighlight('LONGEST')}
+             className={`flex items-center space-x-2 px-4 py-2.5 rounded-lg text-sm font-bold transition-all duration-300 ${
+               highlightMode === 'LONGEST'
                ? 'bg-purple-600 text-white shadow-[0_0_15px_rgba(147,51,234,0.5)] border border-transparent' 
-               : 'bg-white text-purple-600 border border-purple-200 hover:bg-purple-50 active:scale-95'
+               : 'bg-white text-purple-600 border border-purple-200 hover:bg-purple-50 active:scale-95 opacity-80 hover:opacity-100'
              }`}
            >
-             <span className="text-lg leading-none">{isHighlighting ? '✨' : '⚡'}</span>
-             <span>{isHighlighting ? 'Clear Highlight' : 'Longest Chain'}</span>
+             <span className="text-lg leading-none">✨</span>
+             <span>Longest Chain</span>
            </button>
+
+           <button 
+             onClick={() => toggleHighlight('IMPACT')}
+             className={`flex items-center space-x-2 px-4 py-2.5 rounded-lg text-sm font-bold transition-all duration-300 ${
+               highlightMode === 'IMPACT'
+               ? 'bg-orange-600 text-white shadow-[0_0_15px_rgba(234,88,12,0.5)] border border-transparent' 
+               : 'bg-white text-orange-600 border border-orange-200 hover:bg-orange-50 active:scale-95 opacity-80 hover:opacity-100'
+             }`}
+           >
+             <span className="text-lg leading-none">🔥</span>
+             <span>Highest Impact</span>
+           </button>
+
         </Panel>
       </ReactFlow>
 

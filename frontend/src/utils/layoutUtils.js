@@ -8,7 +8,7 @@ export const getLayoutedElements = (nodes, edges, direction = 'TB') => {
   
   dagreGraph.setGraph({ 
     rankdir: direction,
-    ranksep: 120, 
+    ranksep: 200, 
     nodesep: 80   
   });
 
