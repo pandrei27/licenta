@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import ReactFlow, { Background, Controls, MiniMap, MarkerType } from 'reactflow';
+import ReactFlow, { Background, Controls, MiniMap, MarkerType, Panel } from 'reactflow';
 import 'reactflow/dist/style.css';
 import axios from 'axios';
 import { getLayoutedElements } from '../utils/layoutUtils';
@@ -17,6 +17,8 @@ const VisualGraph = () => {
   
   const [simRootId, setSimRootId] = useState(null);
   const [simRootState, setSimRootState] = useState("INCREASING");
+  
+  const [isHighlighting, setIsHighlighting] = useState(false);
 
   const applyStateAndStyles = useCallback((rawNodes, rawEdges, rootId, initialState) => {
     const nodeStates = {};
@@ -71,7 +73,8 @@ const VisualGraph = () => {
           borderColor: state === 'INCREASING' ? '#22c55e' : '#ef4444',
           borderWidth: '2px',
           borderStyle: 'solid',
-          animationDelay: `${delay}ms`
+          animationDelay: `${delay}ms`,
+          transition: 'opacity 0.4s ease, border-color 0.4s ease, box-shadow 0.4s ease, background-color 0.4s ease' 
         }
       };
     });
@@ -89,7 +92,8 @@ const VisualGraph = () => {
         style: {
           stroke: strokeColor,
           strokeWidth: calculateEdgeWidth(edge.data?.impact_percentage || 1),
-          animation: `popIn 0.8s ease-out ${edgeDelay}ms both` 
+          animation: `popIn 0.8s ease-out ${edgeDelay}ms both`,
+          transition: 'opacity 0.4s ease, stroke 0.4s ease' 
         },
         markerEnd: {
           type: MarkerType.ArrowClosed,
@@ -122,14 +126,156 @@ const VisualGraph = () => {
     });
   }, [edges, nodes]);
 
+  // Highlight DFS Logic & Animation
+  const toggleLongestChain = () => {
+    if (!simRootId || nodes.length === 0) return;
+
+    if (isHighlighting) {
+      // 1. REVERT: Strip custom styles, return to state colors, restore arrowheads
+      setIsHighlighting(false);
+      
+      setNodes(nds => nds.map(n => ({
+        ...n,
+        style: {
+          ...n.style,
+          animation: 'none', 
+          borderColor: n.data.state === 'INCREASING' ? '#22c55e' : '#ef4444',
+          boxShadow: 'none',
+          opacity: 1
+        }
+      })));
+
+      setEdges(eds => eds.map(e => {
+        const targetState = nodes.find(n => n.id === e.target)?.data?.state || 'INCREASING';
+        const strokeColor = targetState === 'INCREASING' ? '#22c55e' : '#ef4444';
+        return {
+          ...e,
+          animated: false,
+          style: {
+            ...e.style,
+            stroke: strokeColor,
+            opacity: 1,
+            animation: 'none',
+            filter: 'none'
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 7, height: 7,
+            color: strokeColor // Restore arrowhead color
+          }
+        };
+      }));
+      return;
+    }
+
+    // 2. ACTIVATE: DFS to find longest array of consecutive nodes
+    let maxPath = [];
+    
+    const dfs = (currId, currentPath) => {
+      const outEdges = edges.filter(e => e.source === currId);
+      
+      if (outEdges.length === 0) {
+        if (currentPath.length > maxPath.length) {
+          maxPath = [...currentPath];
+        }
+        return;
+      }
+      
+      for (const e of outEdges) {
+        if (!currentPath.includes(e.target)) {
+          dfs(e.target, [...currentPath, e.target]);
+        }
+      }
+    };
+    
+    dfs(simRootId, [simRootId]);
+
+    // 3. APPLY STYLES: Highlight path and dim the rest explicitly
+    setIsHighlighting(true);
+    
+    setNodes(nds => nds.map(n => {
+      const pathIndex = maxPath.indexOf(n.id);
+      
+      if (pathIndex !== -1) {
+        return {
+          ...n,
+          style: {
+            ...n.style,
+            borderColor: '#9333ea', 
+            boxShadow: '0 4px 20px 4px rgba(147, 51, 234, 0.4)',
+            opacity: 1,
+            // Sequential depth-based jump delay
+            animation: `nodeJump 0.5s ease-out ${pathIndex * 0.15}s forwards`
+          }
+        };
+      } else {
+        return {
+          ...n,
+          style: { 
+            ...n.style, 
+            opacity: 0.15, 
+            borderColor: '#cbd5e1', // Explicitly dim border
+            boxShadow: 'none', 
+            animation: 'none' 
+          }
+        };
+      }
+    }));
+
+    setEdges(eds => eds.map(e => {
+      const srcIdx = maxPath.indexOf(e.source);
+      const tgtIdx = maxPath.indexOf(e.target);
+      const inPath = srcIdx !== -1 && tgtIdx !== -1 && tgtIdx === srcIdx + 1;
+
+      if (inPath) {
+        return {
+          ...e,
+          animated: false, // Turn off dotted lines
+          style: {
+            ...e.style,
+            stroke: '#9333ea',
+            strokeWidth: (e.style?.strokeWidth || 2) + 1, // Make slightly thicker
+            filter: 'drop-shadow(0px 0px 4px rgba(147, 51, 234, 0.8))',
+            opacity: 0, // Starts invisible, animation handles the rest
+            // DFS depth-based drawing animation stagger
+            animation: `pathEdgeReveal 0.4s ease-out ${(srcIdx * 0.15) + 0.1}s forwards`
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 7, height: 7,
+            color: '#9333ea',
+          }
+        };
+      } else {
+        return {
+          ...e,
+          animated: false,
+          style: { 
+            ...e.style, 
+            stroke: '#cbd5e1', // Explicitly dim the line color
+            opacity: 0.2, 
+            animation: 'none',
+            filter: 'none'
+          },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 7, height: 7,
+            color: '#cbd5e1', // Explicitly dim the arrowhead!
+          }
+        };
+      }
+    }));
+  };
+
   const handleExpand = async () => {
     if (!selectedNode || !simRootId) return;
+    setIsHighlighting(false); 
 
     try {
       const response = await axios.post(`http://localhost:8000/api/expand/${selectedNode.id}`, {
         label: selectedNode.label,
         existing_labels: nodes.map(n => n.data?.label),
-        n_count: 2 // Forward compatibility for expansion
+        n_count: 2 
       });
 
       const newNodes = response.data.nodes.map(n => ({...n, data: { ...n.data, label: n.data?.label || n.label}}));
@@ -149,8 +295,8 @@ const VisualGraph = () => {
     }
   };
 
-  // NEW: Updated to accept target_labels and n_count
   const startSimulation = useCallback(async (node_label, initial_state, target_labels, n_count) => {
+    setIsHighlighting(false); 
     try {
       const response = await axios.post('http://localhost:8000/api/start', {
         node_label,
@@ -178,7 +324,6 @@ const VisualGraph = () => {
     }
   }, [applyStateAndStyles]);
 
-  // NEW: Listen to the updated custom event payload
   useEffect(() => {
     const handleStartSim = (e) => startSimulation(
       e.detail.node_label, 
@@ -192,6 +337,21 @@ const VisualGraph = () => {
 
   return (
     <div className="w-full h-full relative">
+      <style>
+        {`
+          @keyframes nodeJump {
+            0%, 100% { translate: 0 0; }
+            50% { translate: 0 -12px; }
+          }
+          /* This makes the line draw itself dynamically */
+          @keyframes pathEdgeReveal {
+            0% { stroke-dasharray: 1000; stroke-dashoffset: 1000; opacity: 0; }
+            1% { opacity: 1; }
+            100% { stroke-dasharray: 1000; stroke-dashoffset: 0; opacity: 1; }
+          }
+        `}
+      </style>
+
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -201,6 +361,20 @@ const VisualGraph = () => {
         <Background color="#cbd5e1" gap={16} />
         <Controls />
         <MiniMap nodeColor={(n) => n.className?.includes('bg-green-50') ? '#22c55e' : '#ef4444'} />
+        
+        <Panel position="top-right" className="bg-white/90 p-2 rounded-xl shadow-lg backdrop-blur-md border border-gray-200 mt-2 mr-2">
+           <button 
+             onClick={toggleLongestChain}
+             className={`flex items-center space-x-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-all duration-300 ${
+               isHighlighting 
+               ? 'bg-purple-600 text-white shadow-[0_0_15px_rgba(147,51,234,0.5)] border border-transparent' 
+               : 'bg-white text-purple-600 border border-purple-200 hover:bg-purple-50 active:scale-95'
+             }`}
+           >
+             <span className="text-lg leading-none">{isHighlighting ? '✨' : '⚡'}</span>
+             <span>{isHighlighting ? 'Clear Highlight' : 'Longest Chain'}</span>
+           </button>
+        </Panel>
       </ReactFlow>
 
       {selectedNode && (
