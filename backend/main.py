@@ -51,10 +51,9 @@ GRAPH = nx.DiGraph()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PYDANTIC MODELS (Now with Auto-Uppercase Normalization)
+# PYDANTIC MODELS
 # ──────────────────────────────────────────────────────────────────────────────
 class AiRelationship(BaseModel):
-    """Represents one causal relationship returned by the Gemini AI."""
     label: str = Field(..., description="Target macroeconomic node label")
     base_direction: str = Field(..., description="DIRECT or INVERSE")
     impact_percentage: float = Field(..., description="Estimated real-world percentual impact")
@@ -64,7 +63,6 @@ class AiRelationship(BaseModel):
     @field_validator("label")
     @classmethod
     def normalize_label(cls, v: str) -> str:
-        # Converts " gOld " to "GOLD" automatically
         return " ".join(v.strip().split()).upper()
 
     @field_validator("base_direction")
@@ -84,6 +82,10 @@ class AiRelationship(BaseModel):
 class StartSimulationRequest(BaseModel):
     node_label: str = Field(..., min_length=1)
     initial_state: str = Field(default="INCREASING")
+    # NEW: Handle comma-separated targeted assets
+    target_labels: Optional[str] = Field(default=None) 
+    # NEW: Forward compatibility for custom node counts
+    n_count: int = Field(default=3)
 
     @field_validator("node_label")
     @classmethod
@@ -93,6 +95,8 @@ class StartSimulationRequest(BaseModel):
 class ExpandNodeRequest(BaseModel):
     label: str = Field(..., min_length=1)
     existing_labels: list[str] = Field(default_factory=list)
+    # NEW: Forward compatibility
+    n_count: int = Field(default=2)
 
     @field_validator("label")
     @classmethod
@@ -146,15 +150,11 @@ def load_graph_to_memory():
     logger.info(f"Loaded graph into RAM: {GRAPH.number_of_nodes()} nodes, {GRAPH.number_of_edges()} edges.")
 
 def get_or_create_node(conn: sqlite3.Connection, label: str) -> str:
-    # Double check normalization just in case
     norm_label = " ".join(label.strip().split()).upper()
-    
-    # FIX: Use UPPER() in SQLite query to perfectly match existing messy data
     cur = conn.execute("SELECT id FROM nodes WHERE UPPER(label) = ?", (norm_label,))
     row = cur.fetchone()
     if row:
         return row["id"]
-    
     new_id = str(uuid.uuid4())
     conn.execute("INSERT INTO nodes (id, label) VALUES (?, ?)", (new_id, norm_label))
     GRAPH.add_node(new_id, label=norm_label)
@@ -170,7 +170,6 @@ def parse_reasoning(raw_reasoning: str) -> Any:
 def insert_edge(conn: sqlite3.Connection, source_id: str, target_id: str, rel: AiRelationship) -> str:
     edge_id = str(uuid.uuid4())
     reasoning_str = json.dumps(rel.reasoning)
-    
     conn.execute("""
         INSERT INTO edges (id, source_id, target_id, base_direction, impact_percentage, time_horizon, reasoning)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -184,13 +183,9 @@ def insert_edge(conn: sqlite3.Connection, source_id: str, target_id: str, rel: A
     return edge_id
 
 def get_cached_subgraph(source_id: str, depth_limit: int = 4) -> Tuple[List[dict], List[dict]]:
-    """Traverses the RAM graph to pull the full downstream tree up to the depth limit."""
     if source_id not in GRAPH:
         return [], []
-    
-    # Use NetworkX Breadth-First Search to grab ALL downstream edges
     bfs_edges = list(nx.bfs_edges(GRAPH, source=source_id, depth_limit=depth_limit))
-    
     if not bfs_edges:
         return [], []
 
@@ -198,8 +193,6 @@ def get_cached_subgraph(source_id: str, depth_limit: int = 4) -> Tuple[List[dict
     edges_list = []
     
     for u, v in bfs_edges:
-        # We only add the target 'v' to the nodes set. 
-        # The root node 'u' is handled by the API endpoints automatically.
         nodes_set.add(v) 
         data = GRAPH.edges[u, v]
         edges_list.append({
@@ -217,109 +210,80 @@ def get_cached_subgraph(source_id: str, depth_limit: int = 4) -> Tuple[List[dict
     nodes_list = [{"id": n, "data": {"label": GRAPH.nodes[n]["label"]}} for n in nodes_set]
     return nodes_list, edges_list
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SEED DATA (Phase 2 Mock)
-# ──────────────────────────────────────────────────────────────────────────────
-def seed_db_if_empty():
-    with get_db_connection() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-        if count > 0:
-            return
-
-        logger.info("Database is empty. Seeding Phase 2 Mock Data...")
-        
-        r_id = get_or_create_node(conn, "Federal Funds Rate")
-        c1_id = get_or_create_node(conn, "Mortgage Rates")
-        c2_id = get_or_create_node(conn, "Treasury Yields")
-        c3_id = get_or_create_node(conn, "Consumer Spending")
-        d1_id = get_or_create_node(conn, "Housing Demand")
-        d2_id = get_or_create_node(conn, "Construction Activity")
-
-        seed_edges = [
-            (r_id, c1_id, AiRelationship(label="Mortgage Rates", base_direction="DIRECT", impact_percentage=10.0, time_horizon="Short", reasoning=["Trigger: The Federal Reserve adjusts the benchmark overnight lending rate.", "Flow: Commercial banks immediately adjust their prime lending rates to maintain margins.", "Effect: Mortgage rates rise or fall in direct correlation with the federal funds rate."])),
-            (r_id, c2_id, AiRelationship(label="Treasury Yields", base_direction="DIRECT", impact_percentage=15.0, time_horizon="Short", reasoning=["Trigger: The Federal Reserve signals a change in monetary policy.", "Flow: Institutional investors reprice the risk-free rate of return.", "Effect: Treasury yields adjust directly to reflect the new benchmark rate."])),
-            (r_id, c3_id, AiRelationship(label="Consumer Spending", base_direction="INVERSE", impact_percentage=5.0, time_horizon="Medium", reasoning=["Trigger: Benchmark interest rates rise significantly.", "Flow: The cost of borrowing for credit cards and auto loans increases, reducing disposable income.", "Effect: Consumer spending slows down as debt servicing becomes more expensive."])),
-            (c1_id, d1_id, AiRelationship(label="Housing Demand", base_direction="INVERSE", impact_percentage=20.0, time_horizon="Medium", reasoning=["Trigger: Mortgage rates spike.", "Flow: The monthly payment required to buy an average home prices out many potential buyers.", "Effect: Housing demand drops sharply as affordability collapses."])),
-            (c1_id, d2_id, AiRelationship(label="Construction Activity", base_direction="INVERSE", impact_percentage=12.0, time_horizon="Long", reasoning=["Trigger: Housing demand dries up and existing inventory sits on the market.", "Flow: Homebuilders halt new projects to avoid holding unsold inventory in a high-rate environment.", "Effect: Construction activity contracts significantly over the long term."]))
-        ]
-
-        for src, tgt, rel in seed_edges:
-            insert_edge(conn, src, tgt, rel)
-        
-        conn.commit()
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # GEMINI AI BRAIN
 # ──────────────────────────────────────────────────────────────────────────────
-@retry(
-    wait=wait_exponential(multiplier=1, min=4, max=10),
-    stop=stop_after_attempt(5),
-    retry=retry_if_exception_type((Exception,)),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
+
+# 1. Existing Generative AI Call
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(5), reraise=True)
 def _call_gemini_sync(node_label: str, existing_labels: list[str], n_count: int) -> list[AiRelationship]:
     existing_str = ", ".join(existing_labels) if existing_labels else "none"
-    
     prompt = f"""
 You are an expert financial educator explaining market correlations in plain, everyday English.
 Identify exactly {n_count} specific financial assets, sectors, or equities that have the HIGHEST sensitivity and most direct exposure to {node_label}. 
 
-Focus on what is actually impacted the most in the real world. (For example, if the input is Copper, focus on highly correlated assets like Copper Miners or Industrials, rather than loosely correlated macro currencies). 
-
-CRITICAL DEDUPLICATION RULE: Do not include any of these already existing factors (or semantic variations of them): {existing_str}. 
-
-Assume {node_label} is experiencing a standard, realistic cyclical trend (e.g., a typical 6-to-12 month bull or bear market).
+CRITICAL DEDUPLICATION RULE: Do not include any of these already existing factors: {existing_str}. 
 
 For each identified asset:
-1. Determine if the relationship is DIRECT (they move together) or INVERSE (they move in opposite directions). 
-2. Estimate the 'impact_percentage'. This should be a realistic estimate of how much the target asset's price would change over the course of this standard trend, based on its historical sensitivity (Beta). Use realistic structural numbers (e.g., 8.5, 15.0, 25.0). Do not artificially exaggerate, but avoid tiny daily noise/fractions (like 0.05).
+1. Determine if the relationship is DIRECT or INVERSE. 
+2. Estimate the 'impact_percentage' (realistic structural numbers).
 3. Determine the 'time_horizon': Short (3 months), Medium (2 years), or Long (10+ years). 
-4. Provide the reasoning as a simple, easy-to-understand 3-step story. ABSOLUTELY NO HEAVY FINANCIAL JARGON. Explain the real-world business or economic reaction so a beginner could easily grasp it.
-    
+4. Provide the reasoning as a simple, easy-to-understand 3-step story. 
+
 Format the reasoning exactly like this:
-- Trigger: [Simple explanation of the trend]
-- Flow: [Simple story of the business, consumer, or market reaction]
-- Effect: [The final result on the target asset]
+- Trigger: [What happens first]
+- Flow: [The real-world story]
+- Effect: [The final result]
 
 Respond in strict JSON matching the required schema: a JSON array of exactly {n_count} objects.
 [
-  {{
-    "label": "string",
-    "base_direction": "DIRECT" | "INVERSE",
-    "impact_percentage": float,
-    "time_horizon": "Short" | "Medium" | "Long",
-    "reasoning": [
-      "Trigger: [What happens first]",
-      "Flow: [The real-world story]",
-      "Effect: [The final result]"
-    ]
-  }}
+  {{ "label": "string", "base_direction": "DIRECT" | "INVERSE", "impact_percentage": float, "time_horizon": "Short" | "Medium" | "Long", "reasoning": ["Trigger:...", "Flow:...", "Effect:..."] }}
 ]
 Output ONLY the JSON array.
 """.strip()
-
-    logger.info(f"🤖 Gemini query → '{node_label}' (Requesting {n_count} nodes)")
-    response = gemini_model.generate_content(
-        prompt,
-        generation_config={"response_mime_type": "application/json"},
-    )
-    
-    raw = response.text.strip()
-    logger.info(f"🤖 Raw API Response:\n{raw}")
-
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-
-    parsed = json.loads(raw)
+    response = gemini_model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    parsed = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
     return [AiRelationship(**item) for item in parsed]
+
+# 2. NEW: Targeted AI Call
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10), stop=stop_after_attempt(5), reraise=True)
+def _call_gemini_targeted_sync(node_label: str, target_labels: list[str]) -> list[AiRelationship]:
+    targets_str = ", ".join(target_labels)
+    n_count = len(target_labels)
+    prompt = f"""
+You are an expert financial educator. 
+Analyze the direct macroeconomic impact of a significant cyclical move in {node_label} on EACH of the following specific assets: {targets_str}.
+
+You MUST return an analysis for ALL {n_count} requested target assets. Do not add any others.
+
+For each target asset:
+1. Determine if the relationship is DIRECT or INVERSE.
+2. Estimate the 'impact_percentage' (realistic structural numbers).
+3. Determine the 'time_horizon': Short (3 months), Medium (2 years), or Long (10+ years).
+4. Provide the reasoning as a 3-step story.
+
+Format the reasoning exactly like this:
+- Trigger: [What happens first]
+- Flow: [The real-world story]
+- Effect: [The final result]
+
+Respond in strict JSON matching the required schema: a JSON array of exactly {n_count} objects.
+[
+  {{ "label": "MUST EXACTLY MATCH THE TARGET ASSET NAME", "base_direction": "DIRECT" | "INVERSE", "impact_percentage": float, "time_horizon": "Short" | "Medium" | "Long", "reasoning": ["Trigger:...", "Flow:...", "Effect:..."] }}
+]
+Output ONLY the JSON array.
+""".strip()
+    response = gemini_model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    parsed = json.loads(response.text.strip().removeprefix("```json").removesuffix("```").strip())
+    return [AiRelationship(**item) for item in parsed]
+
 
 async def get_ai_relationships(node_label: str, existing_labels: list[str], n_count: int) -> list[AiRelationship]:
     return await asyncio.to_thread(_call_gemini_sync, node_label, existing_labels, n_count)
+
+async def get_ai_relationships_targeted(node_label: str, target_labels: list[str]) -> list[AiRelationship]:
+    return await asyncio.to_thread(_call_gemini_targeted_sync, node_label, target_labels)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -327,71 +291,84 @@ async def get_ai_relationships(node_label: str, existing_labels: list[str], n_co
 # ──────────────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🚀 Starting CAUSAL-FLOW Engine (SQLite + NetworkX)...")
     init_db()
-    seed_db_if_empty()
     load_graph_to_memory()
     yield
-    logger.info("🛑 Shutting down.")
 
 app = FastAPI(title="CAUSAL-FLOW API", lifespan=lifespan)
-
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
-
-@app.get("/api/health")
-async def health_check():
-    return {"status": "ok", "graph_nodes": GRAPH.number_of_nodes()}
-
-@app.get("/api/mock-simulation")
-async def get_mock_simulation():
-    nodes = [{"id": n, "data": {"label": d["label"]}} for n, d in GRAPH.nodes(data=True)]
-    edges = [{
-        "id": d["id"], "source": u, "target": v, 
-        "data": {k: (parse_reasoning(v) if k == "reasoning" else v) for k,v in d.items() if k not in ["id", "source_id", "target_id"]}
-    } for u, v, d in GRAPH.edges(data=True)]
-    return {"nodes": nodes, "edges": edges}
-
-@app.get("/api/simulation/{node_id}")
-async def get_simulation(node_id: str):
-    if node_id not in GRAPH:
-        raise HTTPException(status_code=404, detail="Node not found.")
-    
-    bfs_edges = list(nx.bfs_edges(GRAPH, source=node_id, depth_limit=3))
-    
-    sub_nodes = {node_id}
-    for u, v in bfs_edges:
-        sub_nodes.add(u)
-        sub_nodes.add(v)
-
-    nodes = [{"id": n, "data": {"label": GRAPH.nodes[n]["label"]}} for n in sub_nodes]
-    edges = []
-    for u, v in bfs_edges:
-        data = GRAPH.edges[u, v]
-        edges.append({
-            "id": data["id"], "source": u, "target": v,
-            "data": {k: (parse_reasoning(v) if k == "reasoning" else v) for k,v in data.items() if k not in ["id", "source_id", "target_id"]}
-        })
-
-    return {"nodes": nodes, "edges": edges}
 
 @app.post("/api/start")
 async def start_simulation(request: StartSimulationRequest):
-    # Pydantic has already upper-cased request.node_label
     node_label = request.node_label
 
     with get_db_connection() as conn:
         root_id = get_or_create_node(conn, node_label)
-        
+
+        # -------------------------------------------------------------
+        # BRANCH A: TARGETED ASSETS (Specific specific relationships)
+        # -------------------------------------------------------------
+        if request.target_labels:
+            raw_targets = [t.strip().upper() for t in request.target_labels.split(",") if t.strip()]
+            target_labels = list(dict.fromkeys(raw_targets))
+
+            edges_to_return = []
+            nodes_to_return = [{"id": root_id, "data": {"label": node_label}}]
+            missing_targets = []
+            target_nodes_info = {}
+
+            # Check cache per-target specifically
+            for t_label in target_labels:
+                tgt_id = get_or_create_node(conn, t_label)
+                target_nodes_info[t_label] = tgt_id
+                
+                if GRAPH.has_edge(root_id, tgt_id):
+                    data = GRAPH.edges[root_id, tgt_id]
+                    edges_to_return.append({
+                        "id": data["id"], "source": root_id, "target": tgt_id,
+                        "data": {
+                            "base_direction": data["base_direction"], "impact_percentage": data["impact_percentage"], 
+                            "time_horizon": data["time_horizon"], "reasoning": parse_reasoning(data["reasoning"])
+                        }
+                    })
+                    nodes_to_return.append({"id": tgt_id, "data": {"label": t_label}})
+                else:
+                    missing_targets.append(t_label)
+            
+            # Fetch missing from AI
+            if missing_targets:
+                try:
+                    ai_rels = await get_ai_relationships_targeted(node_label, missing_targets)
+                    for rel in ai_rels:
+                        tgt_label_upper = rel.label.upper()
+                        tgt_id = target_nodes_info.get(tgt_label_upper)
+                        if not tgt_id:
+                            tgt_id = get_or_create_node(conn, rel.label)
+                            target_nodes_info[tgt_label_upper] = tgt_id
+                            
+                        if not any(n["id"] == tgt_id for n in nodes_to_return):
+                            nodes_to_return.append({"id": tgt_id, "data": {"label": rel.label}})
+                            
+                        edge_id = insert_edge(conn, root_id, tgt_id, rel)
+                        edges_to_return.append({
+                            "id": edge_id, "source": root_id, "target": tgt_id,
+                            "data": {"base_direction": rel.base_direction, "impact_percentage": rel.impact_percentage,
+                                     "time_horizon": rel.time_horizon, "reasoning": rel.reasoning}
+                        })
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Targeted AI Error: {e}")
+                    raise HTTPException(status_code=502, detail=str(e))
+
+            return { "nodes": nodes_to_return, "edges": edges_to_return, "initial_state": request.initial_state, "root_id": root_id }
+
+        # -------------------------------------------------------------
+        # BRANCH B: GENERATIVE RANDOM ASSETS (Standard flow)
+        # -------------------------------------------------------------
         cached_nodes, cached_edges = get_cached_subgraph(root_id, depth_limit=4)
         if cached_edges:
-            logger.info(f"✅ Cache HIT for Start: '{node_label}'")
-            conn.commit()
             return {
                 "nodes": [{"id": root_id, "data": {"label": node_label}}] + cached_nodes,
                 "edges": cached_edges,
@@ -399,59 +376,49 @@ async def start_simulation(request: StartSimulationRequest):
                 "root_id": root_id
             }
 
-        logger.info(f"🔍 Cache MISS for Start: '{node_label}'")
         try:
-            ai_rels = await get_ai_relationships(node_label, [node_label], n_count=3)
+            ai_rels = await get_ai_relationships(node_label, [node_label], n_count=request.n_count)
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
         new_nodes = []
         new_edges = []
-        
         for rel in ai_rels:
             tgt_id = get_or_create_node(conn, rel.label)
             edge_id = insert_edge(conn, root_id, tgt_id, rel)
-            
             new_nodes.append({"id": tgt_id, "data": {"label": rel.label}})
             new_edges.append({
                 "id": edge_id, "source": root_id, "target": tgt_id,
                 "data": {"base_direction": rel.base_direction, "impact_percentage": rel.impact_percentage,
                          "time_horizon": rel.time_horizon, "reasoning": rel.reasoning}
             })
-        
         conn.commit()
 
     return {
         "nodes": [{"id": root_id, "data": {"label": node_label}}] + new_nodes,
-        "edges": new_edges,
-        "initial_state": request.initial_state,
-        "root_id": root_id
+        "edges": new_edges, "initial_state": request.initial_state, "root_id": root_id
     }
 
 @app.post("/api/expand/{node_id}")
 async def expand_node(node_id: str, request: ExpandNodeRequest):
     if node_id not in GRAPH:
-        raise HTTPException(status_code=404, detail="Node ID not found in RAM graph.")
+        raise HTTPException(status_code=404, detail="Node not found.")
 
     cached_nodes, cached_edges = get_cached_subgraph(node_id, depth_limit=4)
     if cached_edges:
-        logger.info(f"✅ Cache HIT for Expand: '{request.label}'")
         return {"nodes": cached_nodes, "edges": cached_edges}
 
-    logger.info(f"🔍 Cache MISS for Expand: '{request.label}'")
     try:
-        ai_rels = await get_ai_relationships(request.label, request.existing_labels, n_count=2)
+        ai_rels = await get_ai_relationships(request.label, request.existing_labels, n_count=request.n_count)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     new_nodes = []
     new_edges = []
-
     with get_db_connection() as conn:
         for rel in ai_rels:
             tgt_id = get_or_create_node(conn, rel.label)
             edge_id = insert_edge(conn, node_id, tgt_id, rel)
-            
             new_nodes.append({"id": tgt_id, "data": {"label": rel.label}})
             new_edges.append({
                 "id": edge_id, "source": node_id, "target": tgt_id,
@@ -461,7 +428,6 @@ async def expand_node(node_id: str, request: ExpandNodeRequest):
         conn.commit()
 
     return {"nodes": new_nodes, "edges": new_edges}
-
 
 if __name__ == "__main__":
     import uvicorn

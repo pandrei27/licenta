@@ -5,7 +5,6 @@ import axios from 'axios';
 import { getLayoutedElements } from '../utils/layoutUtils';
 import SidePanel from './common/SidePanel';
 
-// REVERTED to original Log10 mathematical calculation
 const calculateEdgeWidth = (impactPercentage) => {
   if (impactPercentage <= 0) return 1;
   return Math.max(1, Math.min(25, Math.log10(impactPercentage + 1) * 5));
@@ -57,7 +56,6 @@ const VisualGraph = () => {
     const styledNodes = rawNodes.map(node => {
       const state = nodeStates[node.id] || 'INCREASING'; 
       const label = node.data?.label || node.label || "Unknown Node";
-      
       const delay = (nodeOrder[node.id] || 0) * 150; 
       
       return {
@@ -81,26 +79,22 @@ const VisualGraph = () => {
     const styledEdges = rawEdges.map(edge => {
       const targetState = nodeStates[edge.target] || 'INCREASING';
       const strokeColor = targetState === 'INCREASING' ? '#22c55e' : '#ef4444';
-      
       const targetNodeDelay = (nodeOrder[edge.target] || 0) * 150; 
-      // The arrow will wait for the exact moment the target node appears, plus a 200ms grace period
       const edgeDelay = targetNodeDelay + 200; 
       
       return {
         ...edge,
         animated: false, 
         type: 'smoothstep',
-        // Notice we removed the className here and moved the logic directly into the SVG style
         style: {
           stroke: strokeColor,
           strokeWidth: calculateEdgeWidth(edge.data?.impact_percentage || 1),
-          // Forcing the animation inline guarantees React Flow applies it to the SVG <path>
           animation: `popIn 0.8s ease-out ${edgeDelay}ms both` 
         },
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          width: 7,  // REVERTED to original size
-          height: 7, // REVERTED to original size
+          width: 7, 
+          height: 7, 
           color: strokeColor,
         },
       };
@@ -134,7 +128,8 @@ const VisualGraph = () => {
     try {
       const response = await axios.post(`http://localhost:8000/api/expand/${selectedNode.id}`, {
         label: selectedNode.label,
-        existing_labels: nodes.map(n => n.data?.label)
+        existing_labels: nodes.map(n => n.data?.label),
+        n_count: 2 // Forward compatibility for expansion
       });
 
       const newNodes = response.data.nodes.map(n => ({...n, data: { ...n.data, label: n.data?.label || n.label}}));
@@ -154,11 +149,14 @@ const VisualGraph = () => {
     }
   };
 
-  const startSimulation = useCallback(async (node_label, initial_state) => {
+  // NEW: Updated to accept target_labels and n_count
+  const startSimulation = useCallback(async (node_label, initial_state, target_labels, n_count) => {
     try {
       const response = await axios.post('http://localhost:8000/api/start', {
         node_label,
-        initial_state
+        initial_state,
+        target_labels,
+        n_count
       });
 
       const { nodes: rawNodes, edges: rawEdges } = response.data;
@@ -180,8 +178,14 @@ const VisualGraph = () => {
     }
   }, [applyStateAndStyles]);
 
+  // NEW: Listen to the updated custom event payload
   useEffect(() => {
-    const handleStartSim = (e) => startSimulation(e.detail.node_label, e.detail.initial_state);
+    const handleStartSim = (e) => startSimulation(
+      e.detail.node_label, 
+      e.detail.initial_state,
+      e.detail.target_labels,
+      e.detail.n_count
+    );
     window.addEventListener('start-sim', handleStartSim);
     return () => window.removeEventListener('start-sim', handleStartSim);
   }, [startSimulation]);
