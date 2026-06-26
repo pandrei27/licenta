@@ -367,8 +367,9 @@ async def start_simulation(request: StartSimulationRequest):
         # -------------------------------------------------------------
         # BRANCH B: GENERATIVE RANDOM ASSETS (Standard flow)
         # -------------------------------------------------------------
-        cached_nodes, cached_edges = get_cached_subgraph(root_id, depth_limit=4)
+        cached_nodes, cached_edges = get_cached_subgraph(root_id, depth_limit=10)
         if cached_edges:
+            logger.info(f"Cache hit for root node: {node_label}")
             return {
                 "nodes": [{"id": root_id, "data": {"label": node_label}}] + cached_nodes,
                 "edges": cached_edges,
